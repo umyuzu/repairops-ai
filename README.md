@@ -1,36 +1,65 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# RepairOps AI
 
-## Getting Started
+RepairOps AI is a CPS 5500 midterm prototype for a phone repair shop workflow. The app demonstrates a web dashboard with an AI agent that does operational work instead of only chatting.
 
-First, run the development server:
+## What The Agent Does
+
+- Collects repair problem, device model, staff estimate, and technician result through a guided workflow.
+- Keeps customer name and phone number local in the browser.
+- Sends only repair-related, redacted data to OpenAI.
+- Detects high-risk repair issues early, including water/liquid/spill, motherboard, logic board, HDMI board, no power, Face ID, fingerprint, and Touch ID.
+- Creates a structured repair ticket, risk level, missing documentation list, warranty summary, follow-up draft, staff task, live monitor, and audit log.
+- Generates a downloadable warranty acceptance PDF after the customer confirms the repaired device was received in working condition.
+
+## Tech Stack
+
+- Next.js
+- React
+- TypeScript
+- OpenAI Responses API through server-side Next.js API routes
+- Browser localStorage for prototype ticket persistence
+
+## Privacy Design
+
+Customer name and phone number are entered in the private local form before the agent starts. They are stored in browser localStorage for the prototype and are not sent directly to OpenAI. API requests use masked or private placeholders for customer fields.
+
+This is a course prototype. A production version should replace localStorage with a database, add authentication, and store warranty PDFs in secure object storage.
+
+## Local Setup
+
+Install dependencies:
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm install
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Create `.env.local`:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```bash
+OPENAI_API_KEY=your_openai_api_key_here
+OPENAI_MODEL=gpt-4o-mini
+DEMO_ACCESS_CODE=your_demo_code_here
+```
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Run the development server:
 
-## Learn More
+```bash
+npm run dev -- -H 127.0.0.1 -p 3000 --webpack
+```
 
-To learn more about Next.js, take a look at the following resources:
+Open:
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```text
+http://127.0.0.1:3000
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## Deployment Notes
 
-## Deploy on Vercel
+Do not commit `.env.local` or any real API key. For Vercel or Railway, add `OPENAI_API_KEY`, `OPENAI_MODEL`, and `DEMO_ACCESS_CODE` as environment variables in the hosting dashboard.
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+## Useful Commands
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+```bash
+npm run lint
+npm run build
+```
