@@ -116,7 +116,7 @@ function buildLocalAgent(intake: IntakePayload, ticketId: string, runtimeMs: num
       id: ticketId,
       customer: intake.customer?.trim() || "New Customer",
       maskedPhone: maskPhone(intake.phone),
-      device: intake.device?.trim() || "Device pending",
+      device: intake.device?.trim() || "Device not entered yet",
       repairType,
       issue: intake.issue?.trim() || "Customer issue pending.",
       source: intake.source || "Talk N Fix website quote",

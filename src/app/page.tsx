@@ -1,12 +1,12 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import styles from "./page.module.css";
 
 type RiskLevel = "Low" | "Medium" | "High";
 type RepairStage = "Drop-off" | "Repair in progress" | "Ready for pickup" | "Picked up";
-type StepState = "complete" | "active" | "pending";
 type FlowStage =
   | "idle"
   | "problem"
@@ -14,9 +14,11 @@ type FlowStage =
   | "phone"
   | "device"
   | "estimate"
+  | "beforeProof"
   | "ready"
+  | "pickupEmail"
+  | "afterProof"
   | "agreement"
-  | "approval"
   | "complete";
 
 type RepairRecord = {
@@ -67,7 +69,7 @@ type AgentResult = {
     title: string;
     priority: RiskLevel;
     owner: string;
-    status: "Created" | "Ready for approval";
+    status: "Created";
   };
   promptTokens: number;
   outputTokens: number;
@@ -81,7 +83,13 @@ type Message = {
   text: string;
 };
 
-type TicketStatus = "Demo record" | "Missing docs" | "Waiting for technician" | "Warranty agreement" | "Staff approval" | "Complete";
+type TicketStatus =
+  | "Not started"
+  | "Demo record"
+  | "Missing docs"
+  | "Waiting for technician"
+  | "Warranty agreement"
+  | "Complete";
 type MonitorStatus = "done" | "active" | "pending";
 
 type LiveMonitorStep = {
@@ -89,11 +97,94 @@ type LiveMonitorStep = {
   status: MonitorStatus;
 };
 
+type AgentLoopStatus = "idle" | "active" | "done";
+
+type AgentWorker = {
+  name: string;
+  domain: string;
+  canDo: string;
+  decision: string;
+  output: string;
+  status: AgentLoopStatus;
+};
+
+type AgentLoopEvent = {
+  agent: string;
+  inputFrom: string;
+  action: string;
+  decision: string;
+  handoffTo: string;
+  savedTo: string;
+  details?: string[];
+  receiptUrl?: string;
+};
+
+type AgentTokenUsage = {
+  inputTokens: number;
+  outputTokens: number;
+  totalTokens: number;
+  source?: "measured" | "unavailable" | "fallback";
+};
+
+type AgentAiNotes = {
+  repair: string;
+  pickup: string;
+  warranty: string;
+  payment: string;
+  review: string;
+};
+
+type AgentAiUsage = {
+  repair: AgentTokenUsage;
+  pickup: AgentTokenUsage;
+  warranty: AgentTokenUsage;
+  payment: AgentTokenUsage;
+  review: AgentTokenUsage;
+};
+
+type RepairFlowState = {
+  ticketId: string;
+  customerLabel: string;
+  customerEmail: string;
+  device: string;
+  issue: string;
+  repairEstimate: string;
+  beforePhoto: "Missing" | "Uploaded";
+  afterPhoto: "Missing" | "Uploaded";
+  technicianNote: string;
+  squareSource: string;
+  squareSourceUrl: string;
+  squareEventId: string;
+  squareEventType: string;
+  squareMerchantId: string;
+  squarePaymentId: string;
+  squareAmount: string;
+  squareStatus: "Waiting" | "APPROVED" | "PENDING" | "COMPLETED";
+  squareSourceType: string;
+  squareReceiptUrl: string;
+  squareReceiptNumber: string;
+  squareCardSummary: string;
+  squareReceiptIssuedAt: string;
+  paymentReleasedToReview: boolean;
+  squareDatabaseReceipt: string;
+  pickupEmail: "Not sent" | "Sent" | "Queued" | "Failed";
+  pickupEmailReceipt: string;
+  warrantyReceipt: string;
+  reviewFollowUp: "Not sent" | "Sent" | "Queued" | "Failed";
+  reviewReceipt: string;
+  payment: "Not received" | "Pending" | "Paid";
+  pickup: "Not picked up" | "Picked up";
+  warranty: "Not signed" | "Signed";
+  aiNotes: AgentAiNotes;
+  aiUsage: AgentAiUsage;
+};
+
 type TicketSession = {
   id: string;
   record: RepairRecord;
   result: AgentResult;
   draft: IntakeForm;
+  customerEmail: string;
   messages: Message[];
   stage: FlowStage;
   status: TicketStatus;
@@ -102,9 +193,116 @@ type TicketSession = {
   warrantyPdfDataUrl: string;
 };
 
-const steps = ["Problem", "Device", "Estimate", "Repair ready", "Warranty page", "Staff approve"];
 const storageKey = "repairops-ai-ticket-sessions";
 const accessStorageKey = "repairops-ai-demo-access-code";
+
+const finalAgentTeam: AgentWorker[] = [
+  {
+    name: "Repair Workflow Agent",
+    domain: "Drop-off and repair proof",
+    canDo: "Check ticket, before photo, repair note, and after photo",
+    decision: "Waiting",
+    output: "No drop-off or repair proof has been checked yet.",
+    status: "idle",
+  },
+  {
+    name: "Pickup Email Agent",
+    domain: "Customer pickup email",
+    canDo: "Send the pickup-ready email after the repair ticket and before photo are ready",
+    decision: "Waiting",
+    output: "No pickup email has been sent yet.",
+    status: "idle",
+  },
+  {
+    name: "Warranty Agent",
+    domain: "After photo and pickup signature",
+    canDo: "Require after photo, then capture the customer's pickup and working-condition acceptance",
+    decision: "Waiting",
+    output: "No warranty acceptance has been captured yet.",
+    status: "idle",
+  },
+  {
+    name: "Square Payment Agent",
+    domain: "Square payment event",
+    canDo: "Read Square payment after warranty acceptance and compare amount",
+    decision: "Waiting",
+    output: "No Square payment event has been checked yet.",
+    status: "idle",
+  },
+  {
+    name: "Review Follow-up Agent",
+    domain: "Post-payment review email",
+    canDo: "Send the thank-you and review request after pickup, warranty, and payment",
+    decision: "Waiting",
+    output: "No review follow-up has been sent yet.",
+    status: "idle",
+  },
+];
+
+const initialRepairFlow: RepairFlowState = {
+  ticketId: "R-LIVE-1001",
+  customerLabel: "Walk-in customer",
+  customerEmail: "",
+  device: "iPhone 13 Pro",
+  issue: "Cracked screen after drop",
+  repairEstimate: "$1.00 USD",
+  beforePhoto: "Missing",
+  afterPhoto: "Missing",
+  technicianNote: "Waiting for repair result.",
+  squareSource: "Square API Reference: payment.created webhook",
+  squareSourceUrl: "https://developer.squareup.com/reference/square/webhooks/payment.created",
+  squareEventId: "Not received",
+  squareEventType: "Waiting",
+  squareMerchantId: "6SSW7HV8K2ST5",
+  squarePaymentId: "Not received",
+  squareAmount: "$0.00 USD",
+  squareStatus: "Waiting",
+  squareSourceType: "CARD",
+  squareReceiptUrl: "",
+  squareReceiptNumber: "Not received",
+  squareCardSummary: "Not received",
+  squareReceiptIssuedAt: "",
+  paymentReleasedToReview: false,
+  squareDatabaseReceipt: "No Square event stored yet.",
+  pickupEmail: "Not sent",
+  pickupEmailReceipt: "No pickup email stored yet.",
+  warrantyReceipt: "No warranty acceptance stored yet.",
+  reviewFollowUp: "Not sent",
+  reviewReceipt: "No review request stored yet.",
+  payment: "Not received",
+  pickup: "Not picked up",
+  warranty: "Not signed",
+  aiNotes: {
+    repair: "Waiting for Repair Workflow Agent AI reasoning.",
+    pickup: "Waiting for Pickup Email Agent AI reasoning.",
+    warranty: "Waiting for Warranty Agent AI reasoning.",
+    payment: "Waiting for Square Payment Agent AI reasoning.",
+    review: "Waiting for Review Follow-up Agent AI reasoning.",
+  },
+  aiUsage: {
+    repair: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    pickup: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    warranty: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    payment: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+    review: { inputTokens: 0, outputTokens: 0, totalTokens: 0 },
+  },
+};
+
+const squareOfficialPaymentEvent = {
+  squareEventId: "13b867cf-db3d-4b1c-90b6-2f32a9d78124",
+  squareEventType: "payment.created",
+  squarePaymentId: "hYy9pRFVxpDsO1FB05SunFWUe9JZY",
+  squareAmount: "$1.00 USD",
+  squareStatus: "APPROVED" as const,
+  payment: "Paid" as const,
+};
+
+function formatAgentUsage(usage: AgentTokenUsage) {
+  if (usage.source === "fallback") return "OpenAI tokens: 0 - fallback path used";
+  if (usage.source === "unavailable") return "OpenAI tokens: usage not returned by API";
+  const approximateCost = usage.inputTokens * 0.00000015 + usage.outputTokens * 0.0000006;
+  return `OpenAI tokens: ${usage.inputTokens} input / ${usage.outputTokens} output / ${usage.totalTokens} total · cost ≈ $${approximateCost.toExponential(2)}`;
+}
 
 const emptyIntake: IntakeForm = {
   customer: "",
@@ -116,71 +314,8 @@ const emptyIntake: IntakeForm = {
   beforeNote: "",
   technicianNote: "",
   warrantyAccepted: true,
-  beforePhotoPresent: true,
+  beforePhotoPresent: false,
 };
-
-const repairRecords: RepairRecord[] = [
-  {
-    id: "R-1042",
-    customer: "Customer A",
-    maskedPhone: "***-***-1527",
-    device: "iPhone 14 Pro",
-    repairType: "Screen replacement",
-    issue: "Cracked front glass after drop. Touch still works.",
-    source: "Talk N Fix website quote",
-    customerType: "New",
-    stage: "Drop-off",
-    paymentStatus: "Pending",
-    quotedPrice: 189,
-    beforeNote: "Screen cracked across bottom edge. Touch working. No liquid damage reported.",
-    afterNote: "",
-    warrantyAccepted: true,
-    pickupConfirmed: false,
-    testedAtPickup: false,
-    beforePhotoPresent: true,
-    afterPhotoPresent: false,
-  },
-  {
-    id: "R-1044",
-    customer: "Customer C",
-    maskedPhone: "***-***-6002",
-    device: "iPad Air",
-    repairType: "Water damage diagnostic",
-    issue: "Device stopped powering on after spill.",
-    source: "Google Maps",
-    customerType: "New",
-    stage: "Drop-off",
-    paymentStatus: "Pending",
-    quotedPrice: 49,
-    beforeNote: "",
-    afterNote: "",
-    warrantyAccepted: false,
-    pickupConfirmed: false,
-    testedAtPickup: false,
-    beforePhotoPresent: false,
-    afterPhotoPresent: false,
-  },
-  {
-    id: "R-1048",
-    customer: "Customer G",
-    maskedPhone: "***-***-9190",
-    device: "iPhone 13 Pro",
-    repairType: "Face ID diagnostic",
-    issue: "Face ID stopped working after screen damage.",
-    source: "Website quote",
-    customerType: "New",
-    stage: "Repair in progress",
-    paymentStatus: "Pending",
-    quotedPrice: 0,
-    beforeNote: "Screen cracked near top sensor area. Face ID not working before repair.",
-    afterNote: "",
-    warrantyAccepted: true,
-    pickupConfirmed: false,
-    testedAtPickup: false,
-    beforePhotoPresent: true,
-    afterPhotoPresent: false,
-  },
-];
 
 const requiredFields: Record<RepairStage, Array<[string, (record: RepairRecord) => boolean]>> = {
   "Drop-off": [
@@ -194,6 +329,7 @@ const requiredFields: Record<RepairStage, Array<[string, (record: RepairRecord) 
   ],
   "Ready for pickup": [
     ["technician repair note", (record) => Boolean(record.afterNote)],
+    ["after photo", (record) => record.afterPhotoPresent],
     ["pickup testing confirmation", (record) => record.testedAtPickup],
   ],
   "Picked up": [
@@ -346,7 +482,7 @@ function makeRecord(draft: IntakeForm, id: string): RepairRecord {
     id,
     customer: draft.customer || "New Customer",
     maskedPhone: maskPhone(draft.phone),
-    device: draft.device || "Device pending",
+    device: draft.device || "Device not entered yet",
     repairType,
     issue: draft.issue || "Customer issue pending.",
     source: draft.source,
@@ -364,7 +500,7 @@ function makeRecord(draft: IntakeForm, id: string): RepairRecord {
   };
 }
 
-function localAgent(record: RepairRecord, modelMode = "OpenAI not run yet"): AgentResult {
+function localAgent(record: RepairRecord, modelMode = "OpenAI LLM pending"): AgentResult {
   const missingFields = requiredFields[record.stage]
     .filter(([, isPresent]) => !isPresent(record))
     .map(([field]) => field);
@@ -381,36 +517,27 @@ function localAgent(record: RepairRecord, modelMode = "OpenAI not run yet"): Age
     riskText.includes("fingerprint") ||
     riskText.includes("touch id");
   const risk: RiskLevel = highRisk ? "High" : missingFields.length >= 2 ? "Medium" : "Low";
-  const covered = risk !== "High";
-  const taskTitle = covered
-    ? `Prepare warranty agreement for ${record.id}`
-    : `Manager review required for ${record.id}`;
+  const taskTitle = `Prepare pickup warranty for ${record.id}`;
 
   return {
     missingFields,
     risk,
-    warrantySummary: covered
-      ? `${record.device} repair has a 90-day limited warranty for the installed part and repair labor. Physical damage, water damage, and customer-caused damage are excluded.`
-      : `${record.id} needs manager review before warranty approval because the notes mention a high-risk condition.`,
-    followUpDraft: covered
-      ? `Hi ${record.customer}, your ${record.device} is ready. Your repair includes a 90-day limited warranty for the installed part and service, excluding physical or water damage.`
-      : `Hi ${record.customer}, your ${record.device} repair needs a quick manager review before we finalize warranty and pickup details.`,
-    agentReply: `I created ${record.id}, analyzed the repair readiness note, assigned ${risk.toLowerCase()} risk, drafted warranty language, and created the staff task.`,
-    nextAction: covered ? "Ask the customer to agree to the warranty terms, then staff can approve pickup." : "Send this ticket to manager review.",
+    warrantySummary: `${record.device} repair has a 90-day limited warranty for the installed part and repair labor. Physical damage, water damage, and customer-caused damage are excluded.`,
+    followUpDraft: `Hi ${record.customer}, your ${record.device} is ready. Your repair includes a 90-day limited warranty for the installed part and service, excluding physical or water damage.`,
+    agentReply: `I created ${record.id}, analyzed the repair readiness note, assigned ${risk.toLowerCase()} risk, drafted warranty language, and prepared the next workflow step.`,
+    nextAction: "Ask the customer to review the warranty terms and confirm pickup condition.",
     technicianNotes: record.afterNote
       ? [
           `Technician submitted: ${record.afterNote}`,
-          covered
-            ? "Agent finding: normal warranty path is allowed after customer agreement."
-            : "Agent finding: hold warranty and follow-up until manager review.",
+          "Agent finding: warranty text is ready after after-photo proof and customer pickup confirmation.",
         ]
       : ["Waiting for technician repair-ready note."],
-    followUpDecision: covered ? "Ready after customer warranty agreement" : "Hold follow-up until manager review",
+    followUpDecision: "Ready after customer warranty agreement",
     modelMode,
     staffTask: {
       title: taskTitle,
       priority: risk,
-      owner: risk === "High" ? "Manager review" : "Front counter staff",
+      owner: "Front counter staff",
       status: "Created",
     },
     promptTokens: 520 + record.issue.length + record.afterNote.length,
@@ -423,7 +550,7 @@ function localAgent(record: RepairRecord, modelMode = "OpenAI not run yet"): Age
       record.afterNote ? "Read repair-ready note" : "Waiting for technician repair-ready note",
       `Assigned ${risk} risk level`,
       "Drafted 90-day limited warranty text",
-      `Created staff task: ${taskTitle}`,
+      `Prepared workflow step: ${taskTitle}`,
     ],
   };
 }
@@ -431,54 +558,200 @@ function localAgent(record: RepairRecord, modelMode = "OpenAI not run yet"): Age
 function statusFor(record: RepairRecord, result: AgentResult): TicketStatus {
   if (result.missingFields.length > 0) return "Missing docs";
   if (!record.afterNote) return "Waiting for technician";
-  if (result.risk === "High") return "Staff approval";
   return "Warranty agreement";
 }
 
-function makeSession(record: RepairRecord): TicketSession {
-  const result = localAgent(record);
+function documentationChecklist(session: TicketSession, flow: RepairFlowState) {
+  const stage = session.stage;
+  const needsAfterPhoto = ["afterProof", "agreement", "complete"].includes(stage) || Boolean(session.record.afterNote);
+  const needsWarranty = ["agreement", "complete"].includes(stage) || flow.afterPhoto === "Uploaded";
+  const needsPayment = stage === "complete" || flow.warranty === "Signed";
+
+  return [
+    {
+      label: "Before photo proof",
+      done: flow.beforePhoto === "Uploaded" || session.record.beforePhotoPresent,
+      needed: stage !== "idle",
+    },
+    {
+      label: "Technician repair note",
+      done: Boolean(session.record.afterNote) || flow.technicianNote !== "Waiting for repair result.",
+      needed: ["ready", "pickupEmail", "afterProof", "agreement", "complete"].includes(stage),
+    },
+    {
+      label: "Pickup email event",
+      done: flow.pickupEmail === "Sent" || flow.pickupEmail === "Queued",
+      needed: ["pickupEmail", "afterProof", "agreement", "complete"].includes(stage),
+    },
+    {
+      label: "After photo proof",
+      done: flow.afterPhoto === "Uploaded" || session.record.afterPhotoPresent,
+      needed: needsAfterPhoto,
+    },
+    {
+      label: "Warranty acceptance",
+      done: flow.warranty === "Signed" || Boolean(session.agreementAcceptedAt),
+      needed: needsWarranty,
+    },
+    {
+      label: "Square payment receipt",
+      done: flow.payment === "Paid" && flow.squareReceiptNumber !== "Not received",
+      needed: needsPayment,
+    },
+  ].filter((item) => item.needed);
+}
+
+function queueStateFor(session: TicketSession) {
+  if (session.status === "Not started") {
+    return { agent: "Start", detail: "Open a repair ticket" };
+  }
+  if (session.status === "Complete" || session.stage === "complete") {
+    return { agent: "Done", detail: "Case completed" };
+  }
+  if (session.stage === "agreement" || session.status === "Warranty agreement") {
+    return { agent: "Warranty Agent", detail: "Customer signature needed" };
+  }
+  if (session.stage === "ready") {
+    return { agent: "Repair Agent", detail: "Technician result needed" };
+  }
+  if (session.stage === "pickupEmail") {
+    return { agent: "Pickup Email Agent", detail: "Ready email needed" };
+  }
+  if (session.stage === "afterProof") {
+    return { agent: "Warranty Agent", detail: "After proof needed" };
+  }
+  if (session.stage !== "idle") {
+    return { agent: "Repair Agent", detail: "Intake in progress" };
+  }
+  if (session.result.missingFields.length > 0) {
+    return { agent: "Repair Agent", detail: `${session.result.missingFields.length} document item needed` };
+  }
+  if (!session.record.afterNote) {
+    return { agent: "Repair Agent", detail: "Waiting for repair note" };
+  }
+  return { agent: "Pickup Agent", detail: "Ready for customer contact" };
+}
+
+function makeBlankSession(): TicketSession {
+  const record: RepairRecord = {
+    id: "",
+    customer: "New customer",
+    maskedPhone: "***-***-0000",
+    device: "New repair ticket",
+    repairType: "Repair intake",
+    issue: "Start from the private customer info panel.",
+    source: "Not started",
+    customerType: "New",
+    stage: "Drop-off",
+    paymentStatus: "Pending",
+    quotedPrice: 0,
+    beforeNote: "",
+    afterNote: "",
+    warrantyAccepted: false,
+    pickupConfirmed: false,
+    testedAtPickup: false,
+    beforePhotoPresent: false,
+    afterPhotoPresent: false,
+  };
+
   return {
-    id: record.id,
+    id: "",
     record,
-    result,
-    draft: { ...emptyIntake, issue: record.issue, customer: record.customer, device: record.device },
+    result: {
+      ...localAgent(record),
+      missingFields: [],
+      risk: "Low",
+      warrantySummary: "No active repair ticket yet.",
+      followUpDraft: "Create a repair ticket to begin the customer workflow.",
+      agentReply: "Waiting for the first repair ticket.",
+      nextAction: "Enter private customer information, then create a new repair ticket.",
+      technicianNotes: ["No repair note has been submitted yet."],
+      followUpDecision: "Waiting",
+      logs: ["Waiting for a new repair ticket."],
+      staffTask: {
+        title: "No active repair ticket",
+        priority: "Low",
+        owner: "Front counter staff",
+        status: "Created",
+      },
+    },
+    draft: { ...emptyIntake },
     messages: [
       {
         speaker: "agent",
-        label: "Repair Ticket Agent",
-        text: `Existing ticket ${record.id} loaded. Status: ${statusFor(record, result)}.`,
+        label: "RepairOps team",
+        text: "Enter customer information, then create a new repair ticket to start the agent workflow.",
       },
     ],
     stage: "idle",
-    status: statusFor(record, result),
+    status: "Not started",
+    customerEmail: "",
     agreementName: "",
     agreementAcceptedAt: "",
     warrantyPdfDataUrl: "",
   };
 }
 
-function makeDefaultSessions() {
-  return repairRecords.map(makeSession);
-}
-
 function loadSavedSessions() {
-  if (typeof window === "undefined") return makeDefaultSessions();
+  if (typeof window === "undefined") return [];
 
   try {
     const saved = window.localStorage.getItem(storageKey);
-    if (!saved) return makeDefaultSessions();
+    if (!saved) return [];
     const parsed = JSON.parse(saved) as TicketSession[];
-    if (!Array.isArray(parsed) || parsed.length === 0) return makeDefaultSessions();
+    if (!Array.isArray(parsed) || parsed.length === 0) return [];
 
     return parsed.map((session) => ({
       ...session,
+      customerEmail: session.customerEmail ?? "",
       agreementAcceptedAt: session.agreementAcceptedAt ?? "",
       warrantyPdfDataUrl: session.warrantyPdfDataUrl ?? "",
       result: session.result,
     }));
   } catch {
-    return makeDefaultSessions();
+    return [];
   }
+}
+
+function flowFromSession(session: TicketSession): RepairFlowState {
+  const isComplete = session.stage === "complete" || session.status === "Complete";
+  const hasBeforeProof = session.record.beforePhotoPresent || ["ready", "pickupEmail", "afterProof", "agreement", "complete"].includes(session.stage);
+  const hasTechnicianNote = Boolean(session.record.afterNote) || ["pickupEmail", "afterProof", "agreement", "complete"].includes(session.stage);
+  const hasPickupEmail = ["afterProof", "agreement", "complete"].includes(session.stage);
+  const hasAfterProof = session.record.afterPhotoPresent || ["agreement", "complete"].includes(session.stage);
+  const hasWarranty = Boolean(session.agreementAcceptedAt) || isComplete;
+
+  return {
+    ...initialRepairFlow,
+    ticketId: session.id,
+    customerLabel: session.record.customer || initialRepairFlow.customerLabel,
+    customerEmail: session.customerEmail || initialRepairFlow.customerEmail,
+    device: session.record.device === "Device not entered yet" ? initialRepairFlow.device : session.record.device,
+    issue: session.record.issue || initialRepairFlow.issue,
+    repairEstimate: session.record.quotedPrice > 0 ? `$${session.record.quotedPrice}.00 USD` : initialRepairFlow.repairEstimate,
+    beforePhoto: hasBeforeProof ? "Uploaded" : "Missing",
+    afterPhoto: hasAfterProof ? "Uploaded" : "Missing",
+    technicianNote: hasTechnicianNote ? session.record.afterNote || "Technician result recorded." : "Waiting for repair result.",
+    pickupEmail: hasPickupEmail ? "Queued" : "Not sent",
+    pickupEmailReceipt: hasPickupEmail ? "Pickup email processed for this ticket." : "No pickup email stored yet.",
+    pickup: hasWarranty ? "Picked up" : "Not picked up",
+    warranty: hasWarranty ? "Signed" : "Not signed",
+    warrantyReceipt: hasWarranty ? "Warranty acceptance saved for this ticket." : "No warranty acceptance stored yet.",
+    payment: isComplete ? "Paid" : "Not received",
+    squareStatus: isComplete ? "APPROVED" : "Waiting",
+    squareEventType: isComplete ? "payment.created" : "Waiting",
+    squareEventId: isComplete ? squareOfficialPaymentEvent.squareEventId : "Not received",
+    squarePaymentId: isComplete ? squareOfficialPaymentEvent.squarePaymentId : "Not received",
+    squareAmount: isComplete
+      ? session.record.quotedPrice > 0
+        ? `$${session.record.quotedPrice}.00 USD`
+        : squareOfficialPaymentEvent.squareAmount
+      : "$0.00 USD",
+    squareDatabaseReceipt: isComplete ? "Payment event processed for this ticket." : "No Square event stored yet.",
+    paymentReleasedToReview: isComplete,
+    reviewFollowUp: isComplete ? "Queued" : "Not sent",
+    reviewReceipt: isComplete ? "Review follow-up processed for this ticket." : "No review request stored yet.",
+  };
 }
 
 function placeholder(stage: FlowStage) {
@@ -487,7 +760,10 @@ function placeholder(stage: FlowStage) {
   if (stage === "phone") return "856-555-1842";
   if (stage === "device") return "iPhone 13 Pro";
   if (stage === "estimate") return "189";
+  if (stage === "beforeProof") return "Use Record before proof in the agent workflow before repair starts.";
   if (stage === "ready") return "Repair/diagnostic completed: screen replaced, display and touch tested, device is working at pickup.";
+  if (stage === "pickupEmail") return "Use Send pickup email in the agent workflow.";
+  if (stage === "afterProof") return "Use Record after proof in the agent workflow before warranty signature.";
   return "";
 }
 
@@ -517,6 +793,12 @@ function parseInitialMessage(value: string) {
   };
 }
 
+function moneyTextToCents(value: string) {
+  const amount = Number(value.replace(/[^0-9.]/g, ""));
+  if (!Number.isFinite(amount) || amount <= 0) return 100;
+  return Math.round(amount * 100);
+}
+
 async function getOpenAiChatReply(
   ticketId: string,
   nextStage: FlowStage,
@@ -524,8 +806,8 @@ async function getOpenAiChatReply(
   fallback: string,
   accessCode: string,
 ) {
-  if (nextStage === "idle" || nextStage === "approval" || nextStage === "complete") {
-    return { reply: fallback, modelMode: "OpenAI not run yet" };
+  if (nextStage === "idle" || nextStage === "complete") {
+    return { reply: fallback, modelMode: "OpenAI LLM pending" };
   }
 
   try {
@@ -541,19 +823,25 @@ async function getOpenAiChatReply(
 }
 
 export default function Home() {
-  const [sessions, setSessions] = useState<TicketSession[]>(makeDefaultSessions);
-  const [selectedId, setSelectedId] = useState(repairRecords[0].id);
+  const [sessions, setSessions] = useState<TicketSession[]>([]);
+  const [selectedId, setSelectedId] = useState("");
   const [answer, setAnswer] = useState("");
   const [isRunning, setIsRunning] = useState(false);
   const [hasLoadedSavedTickets, setHasLoadedSavedTickets] = useState(false);
   const [privateCustomer, setPrivateCustomer] = useState("");
   const [privatePhone, setPrivatePhone] = useState("");
+  const [privateEmail, setPrivateEmail] = useState("");
   const [isMonitorOpen, setIsMonitorOpen] = useState(true);
   const [accessCode, setAccessCode] = useState("");
   const [accessInput, setAccessInput] = useState("");
   const [accessError, setAccessError] = useState("");
   const [isAccessUnlocked, setIsAccessUnlocked] = useState(false);
   const [isCheckingAccess, setIsCheckingAccess] = useState(false);
+  const [repairFlow, setRepairFlow] = useState<RepairFlowState>(initialRepairFlow);
+  const [isSquareIngesting, setIsSquareIngesting] = useState(false);
+  const [isWorkflowWriting, setIsWorkflowWriting] = useState(false);
+  const [agentWorkers, setAgentWorkers] = useState<AgentWorker[]>(finalAgentTeam);
+  const [agentLoopEvents, setAgentLoopEvents] = useState<AgentLoopEvent[]>([]);
   const [liveMonitorSteps, setLiveMonitorSteps] = useState<LiveMonitorStep[]>([
     { label: "Waiting for staff action", status: "active" },
     { label: "Private customer fields stay local", status: "pending" },
@@ -561,25 +849,48 @@ export default function Home() {
   ]);
   const chatBoxRef = useRef<HTMLDivElement | null>(null);
   const monitorRunRef = useRef(0);
+  const blankSession = useMemo(() => makeBlankSession(), []);
 
   const selected = useMemo(
-    () => sessions.find((session) => session.id === selectedId) ?? sessions[0],
-    [selectedId, sessions],
+    () => sessions.find((session) => session.id === selectedId) ?? blankSession,
+    [blankSession, selectedId, sessions],
   );
   const record = selected.record;
   const result = selected.result;
-  const estimatedCost = ((result.promptTokens + result.outputTokens) * 0.0000006).toFixed(4);
+  const documentChecklist = documentationChecklist(selected, repairFlow);
+  const missingDocuments = documentChecklist.filter((item) => !item.done);
+  const approximateCost = ((result.promptTokens + result.outputTokens) * 0.0000006).toFixed(4);
+  const activeAgentIndex = Math.max(
+    0,
+    agentWorkers.findIndex((agent) => agent.status === "active") >= 0
+      ? agentWorkers.findIndex((agent) => agent.status === "active")
+      : agentWorkers.findIndex((agent) => agent.status !== "done") >= 0
+        ? agentWorkers.findIndex((agent) => agent.status !== "done")
+        : agentWorkers.length - 1,
+  );
+  const activeAgent = agentWorkers[activeAgentIndex];
+  const workflowTicketId = selected.id || repairFlow.ticketId;
 
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const savedSessions = loadSavedSessions();
       const savedAccessCode = window.localStorage.getItem(accessStorageKey) ?? "";
       setSessions(savedSessions);
-      setSelectedId(savedSessions[0].id);
+      setSelectedId("");
       setAccessCode(savedAccessCode);
       setAccessInput(savedAccessCode);
       setIsAccessUnlocked(Boolean(savedAccessCode));
       setHasLoadedSavedTickets(true);
+
+      if (!savedAccessCode) {
+        void fetch("/api/access", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ accessCode: "" }),
+        }).then((response) => {
+          if (response.ok) setIsAccessUnlocked(true);
+        });
+      }
     }, 0);
 
     return () => window.clearTimeout(timer);
@@ -635,10 +946,6 @@ export default function Home() {
 
   const submitAccessCode = async () => {
     const value = accessInput.trim();
-    if (!value) {
-      setAccessError("Enter the demo access code.");
-      return;
-    }
 
     setIsCheckingAccess(true);
     setAccessError("");
@@ -655,7 +962,7 @@ export default function Home() {
         return;
       }
 
-      window.localStorage.setItem(accessStorageKey, value);
+      if (value) window.localStorage.setItem(accessStorageKey, value);
       setAccessCode(value);
       setIsAccessUnlocked(true);
     } catch {
@@ -688,6 +995,7 @@ export default function Home() {
       record: recordDraft,
       result: localAgent(recordDraft),
       draft,
+      customerEmail: privateEmail.trim(),
       stage: "problem",
       status: "Waiting for technician",
       agreementName: "",
@@ -704,8 +1012,23 @@ export default function Home() {
     setSessions((current) => [session, ...current]);
     setSelectedId(id);
     setAnswer("");
+    const startingFlow = {
+      ...initialRepairFlow,
+      ticketId: id,
+      customerLabel: draft.customer || initialRepairFlow.customerLabel,
+      customerEmail: privateEmail.trim() || initialRepairFlow.customerEmail,
+      device: "Device not entered yet",
+      issue: "Customer issue pending.",
+      repairEstimate: "$0.00 USD",
+      beforePhoto: "Missing" as const,
+      afterPhoto: "Missing" as const,
+      technicianNote: "Waiting for repair result.",
+    };
+    setRepairFlow(startingFlow);
+    applyAgentProgress(startingFlow);
     setPrivateCustomer("");
     setPrivatePhone("");
+    setPrivateEmail("");
     setIsRunning(true);
     beginLiveMonitor([
       "Created local ticket shell",
@@ -741,7 +1064,7 @@ export default function Home() {
     const draft: IntakeForm = {
       ...emptyIntake,
       customer: record.customer,
-      device: record.device === "Device pending" ? "" : record.device,
+      device: record.device === "Device not entered yet" ? "" : record.device,
       issue: record.issue === "Customer issue pending." ? "" : record.issue,
       source: record.source,
       quotedPrice: record.quotedPrice ? String(record.quotedPrice) : "",
@@ -788,19 +1111,17 @@ export default function Home() {
 
   const deleteTicket = (id: string) => {
     const nextSessions = sessions.filter((session) => session.id !== id);
-    const safeSessions = nextSessions.length > 0 ? nextSessions : makeDefaultSessions();
-    setSessions(safeSessions);
+    setSessions(nextSessions);
     if (id === selectedId) {
-      setSelectedId(safeSessions[0].id);
+      setSelectedId(nextSessions[0]?.id ?? "");
       setAnswer("");
     }
   };
 
   const clearSavedTickets = () => {
-    const defaultSessions = makeDefaultSessions();
     window.localStorage.removeItem(storageKey);
-    setSessions(defaultSessions);
-    setSelectedId(defaultSessions[0].id);
+    setSessions([]);
+    setSelectedId("");
     setAnswer("");
   };
 
@@ -833,19 +1154,19 @@ export default function Home() {
       updateSelected({
         record: nextRecord,
         result: nextResult,
-        stage: "agreement",
-        status: nextResult.risk === "High" ? "Staff approval" : "Warranty agreement",
+        stage: "pickupEmail",
+        status: "Waiting for technician",
         messages: [
           ...selected.messages,
           {
             speaker: "agent",
             label: nextResult.modelMode,
-            text: `${nextRecord.id} is ready for warranty review. I drafted the 90-day warranty text and marked the next required action.`,
+            text: `${nextRecord.id} technician notes are analyzed. I drafted the warranty language, but first the Pickup Email Agent must notify the customer that the device is ready.`,
           },
           {
             speaker: "agent",
-            label: "Warranty agreement",
-            text: "I opened the warranty agreement popup for the customer.",
+            label: "Pickup Email Agent",
+            text: "Next required action: send the ready-for-pickup email from the Agent workflow.",
           },
         ],
       });
@@ -855,14 +1176,14 @@ export default function Home() {
       updateSelected({
         record: localRecord,
         result: nextResult,
-        stage: "agreement",
-        status: nextResult.risk === "High" ? "Staff approval" : "Warranty agreement",
+        stage: "pickupEmail",
+        status: "Waiting for technician",
         messages: [
           ...selected.messages,
           {
             speaker: "agent",
             label: "Local safety workflow",
-            text: `${localRecord.id} is ready for warranty review. The API did not complete, so I used the local workflow.`,
+            text: `${localRecord.id} technician notes are analyzed locally. Send the pickup email before moving to after proof and warranty.`,
           },
         ],
       });
@@ -874,7 +1195,7 @@ export default function Home() {
 
   const submitAnswer = async () => {
     const value = answer.trim();
-    if (!value || isRunning || selected.stage === "idle" || selected.stage === "complete" || selected.stage === "approval") return;
+    if (!value || isRunning || selected.stage === "idle" || selected.stage === "complete") return;
     const draft = { ...selected.draft };
     const nextMessages = [...selected.messages, { speaker: "user" as const, label: "You", text: value }];
     setAnswer("");
@@ -890,12 +1211,17 @@ export default function Home() {
         draft,
         record: previewRecord,
         result: previewResult,
-        status: previewResult.risk === "High" ? "Staff approval" : "Waiting for technician",
+        status: "Waiting for technician",
         messages: [
           ...nextMessages,
           { speaker: "agent", label: "Repair Ticket Agent", text: "OpenAI is preparing the next intake question..." },
         ],
         stage: nextStage,
+      });
+      setRepairFlow((current) => {
+        const nextFlow = { ...current, ticketId: selected.id, issue: draft.issue };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
       });
       setIsRunning(true);
       beginLiveMonitor([
@@ -991,7 +1317,7 @@ export default function Home() {
         draft,
         record: previewRecord,
         result: previewResult,
-        status: previewResult.risk === "High" ? "Staff approval" : "Waiting for technician",
+        status: "Waiting for technician",
         messages: [
           ...nextMessages,
           {
@@ -1001,6 +1327,11 @@ export default function Home() {
           },
         ],
         stage: "estimate",
+      });
+      setRepairFlow((current) => {
+        const nextFlow = { ...current, ticketId: selected.id, device: draft.device, issue: draft.issue };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
       });
       setIsRunning(true);
       beginLiveMonitor([
@@ -1028,8 +1359,7 @@ export default function Home() {
     if (selected.stage === "estimate") {
       const numericEstimate = value.replace(/[^0-9.]/g, "");
       draft.quotedPrice = numericEstimate;
-      const fallback =
-        "Estimate saved. When repair or diagnostic is completed, enter the technician result: what was found, what was replaced, test result, and anything still not working.";
+      const estimateDisplay = numericEstimate ? `$${numericEstimate}.00 USD` : "$0.00 USD";
       updateSelected({
         draft,
         record: makeRecord(draft, selected.id),
@@ -1038,38 +1368,59 @@ export default function Home() {
           {
             speaker: "agent",
             label: "Repair Ticket Agent",
-            text: "OpenAI is preparing the technician update question...",
+            text: "Estimate saved. Before repair starts, record the before-photo proof in the agent workflow. I will not move to technician notes until that proof is recorded.",
           },
         ],
-        stage: "ready",
+        stage: "beforeProof",
         status: "Waiting for technician",
       });
-      setIsRunning(true);
+      setRepairFlow((current) => {
+        const nextFlow = {
+          ...current,
+          ticketId: selected.id,
+          device: draft.device || current.device,
+          issue: draft.issue || current.issue,
+          repairEstimate: estimateDisplay,
+          beforePhoto: "Missing" as const,
+        };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
       beginLiveMonitor([
         "Saved staff-entered estimate",
         "Confirmed AI did not generate the price",
-        "Moved ticket to repair/diagnostic waiting step",
+        "Blocked repair flow until before-photo proof is recorded",
       ]);
-      const chat = await getOpenAiChatReply(selected.id, "ready", draft, fallback, accessCode);
-      setSessions((current) =>
-        current.map((session) =>
-          session.id === selected.id
-            ? {
-                ...session,
-                result: { ...session.result, modelMode: chat.modelMode },
-                messages: [...nextMessages, { speaker: "agent", label: chat.modelMode, text: chat.reply }],
-              }
-            : session,
-        ),
-      );
-      setIsRunning(false);
-      finishLiveMonitor("Ticket is waiting for repair or diagnostic completion");
+      finishLiveMonitor("Ticket is waiting for before-photo proof");
+      return;
+    }
+
+    if (selected.stage === "beforeProof") {
+      updateSelected({
+        messages: [
+          ...nextMessages,
+          {
+            speaker: "agent",
+            label: "Repair Workflow Agent",
+            text: "Use the Record before proof button in Agent workflow. Technician notes stay locked until that proof is recorded.",
+          },
+        ],
+      });
       return;
     }
 
     if (selected.stage === "ready") {
       draft.technicianNote = value;
       draft.beforeNote = draft.issue;
+      setRepairFlow((current) => {
+        const nextFlow = {
+          ...current,
+          ticketId: selected.id,
+          technicianNote: value,
+        };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
       updateSelected({
         draft,
         messages: [
@@ -1085,68 +1436,593 @@ export default function Home() {
       return;
     }
 
+    if (selected.stage === "pickupEmail") {
+      updateSelected({
+        messages: [
+          ...nextMessages,
+          {
+            speaker: "agent",
+            label: "Pickup Email Agent",
+            text: "Use the Send pickup email button in Agent workflow. The Warranty Agent will ask for after proof after the pickup email is processed.",
+          },
+        ],
+      });
+      return;
+    }
+
+    if (selected.stage === "afterProof") {
+      updateSelected({
+        messages: [
+          ...nextMessages,
+          {
+            speaker: "agent",
+            label: "Warranty Agent",
+            text: "Use the Record after proof button before warranty signature. The warranty step stays locked until the after proof is recorded.",
+          },
+        ],
+      });
+      return;
+    }
+
     const acceptedAt = new Date().toLocaleString();
     const warrantyPdfDataUrl = makeWarrantyPdfDataUrl(record, result, value, acceptedAt);
     updateSelected({
       agreementName: value,
       agreementAcceptedAt: acceptedAt,
       warrantyPdfDataUrl,
-      stage: "approval",
-      status: "Staff approval",
+      stage: "complete",
+      status: "Complete",
+      record: { ...record, stage: "Picked up", pickupConfirmed: true },
       messages: [
         ...nextMessages,
         {
           speaker: "agent",
           label: "Agreement captured",
-          text: `Warranty acceptance saved for ${value}: customer confirmed they received the repaired device in working condition.`,
+          text: `Warranty acceptance saved for ${value}. The Warranty Agent handed this ticket to the Square Payment Agent.`,
         },
       ],
     });
-    finishLiveMonitor("Warranty acceptance saved for dispute record");
+    finishLiveMonitor("Warranty acceptance saved; payment step is ready");
+    void runWorkflowAction("warranty_acceptance");
   };
 
-  const approveTicket = () => {
-    beginLiveMonitor(["Reviewing warranty acceptance", "Marking pickup complete", "Closing staff task"]);
-    updateSelected({
-      stage: "complete",
-      status: "Complete",
-      record: { ...record, stage: "Picked up", pickupConfirmed: true, paymentStatus: "Paid" },
-      result: {
-        ...result,
-        staffTask: { ...result.staffTask, status: "Ready for approval" },
-        logs: [
-          ...result.logs,
-          "Warranty acceptance captured: customer received repaired device in working condition",
-          "Staff approved pickup and follow-up",
+  const buildAgentProgress = (flow: RepairFlowState) => {
+    const isPaid = flow.payment === "Paid";
+    const isWarrantySigned = flow.warranty === "Signed";
+    const hasBeforePhoto = flow.beforePhoto === "Uploaded";
+    const hasAfterPhoto = flow.afterPhoto === "Uploaded";
+    const pickupEmailSent = flow.pickupEmail === "Sent" || flow.pickupEmail === "Queued";
+    const amountMatches = flow.squareAmount === flow.repairEstimate;
+    const highRiskRepair = /water|liquid|motherboard|face id|fingerprint|no power|short/i.test(flow.issue);
+    const canComplete = isPaid && isWarrantySigned && !highRiskRepair && flow.paymentReleasedToReview;
+    const reviewReady = canComplete;
+
+    const nextAgents: AgentWorker[] = [
+      {
+        ...finalAgentTeam[0],
+        decision: !hasBeforePhoto
+          ? "blocked_before_photo_missing"
+          : highRiskRepair
+            ? "intake_ready_high_risk"
+            : "intake_ready",
+        output: `Ticket ${flow.ticketId}: before photo is ${flow.beforePhoto}. Issue: ${flow.issue}`,
+      },
+      {
+        ...finalAgentTeam[1],
+        decision: !hasBeforePhoto
+          ? "waiting_for_repair_agent"
+          : flow.technicianNote === "Waiting for repair result."
+            ? "waiting_for_technician_ready_note"
+            : pickupEmailSent
+              ? "pickup_email_sent"
+              : "pickup_email_ready",
+        output: `${flow.pickupEmail}. ${flow.pickupEmailReceipt}`,
+      },
+      {
+        ...finalAgentTeam[2],
+        decision: !pickupEmailSent
+          ? "waiting_for_pickup_email"
+          : !hasAfterPhoto
+            ? "blocked_after_photo_missing"
+            : isWarrantySigned
+              ? "warranty_signed"
+              : "ready_for_customer_signature",
+        output: `After photo: ${flow.afterPhoto}. Technician note: ${flow.technicianNote}. Pickup: ${flow.pickup}. Warranty: ${flow.warranty}. ${flow.warrantyReceipt}`,
+      },
+      {
+        ...finalAgentTeam[3],
+        decision: !isWarrantySigned ? "waiting_for_warranty" : !isPaid ? "waiting_for_square_payment" : amountMatches ? "payment_confirmed" : "amount_mismatch",
+        output: `${flow.squareEventType} ${flow.squareEventId}: Square payment ${flow.squarePaymentId} is ${flow.squareStatus} for ${flow.squareAmount}. Repair estimate is ${flow.repairEstimate}.`,
+      },
+      {
+        ...finalAgentTeam[4],
+        decision: reviewReady
+          ? flow.reviewFollowUp === "Sent" || flow.reviewFollowUp === "Queued"
+            ? "review_email_sent"
+            : "review_email_ready"
+          : "waiting_for_payment_completion",
+        output:
+          flow.reviewFollowUp === "Sent" || flow.reviewFollowUp === "Queued"
+            ? flow.reviewReceipt
+            : "Review email will be sent after warranty acceptance and Square payment are complete.",
+      },
+    ];
+
+    const loopEvents: AgentLoopEvent[] = [
+      {
+        agent: nextAgents[0].name,
+        inputFrom: "Repair ticket intake and before-photo proof",
+        action: "Recorded before proof, then waited for technician ready note",
+        decision: nextAgents[0].decision,
+        handoffTo: "Pickup Email Agent",
+        savedTo: "repair_cases / repair_photos / agent_activity_logs",
+        details: [`AI decision: ${flow.aiNotes.repair}`, formatAgentUsage(flow.aiUsage.repair)],
+      },
+      {
+        agent: nextAgents[1].name,
+        inputFrom: "Technician ready note and customer email",
+        action: "Checked readiness and processed ready-for-pickup email",
+        decision: nextAgents[1].decision,
+        handoffTo: "Warranty Agent",
+        savedTo: "pickup_email_events / agent_activity_logs",
+        details: [`AI decision: ${flow.aiNotes.pickup}`, formatAgentUsage(flow.aiUsage.pickup)],
+      },
+      {
+        agent: nextAgents[2].name,
+        inputFrom: "Pickup email confirmation and after-photo proof",
+        action: "Recorded after proof and captured warranty acceptance",
+        decision: nextAgents[2].decision,
+        handoffTo: "Square Payment Agent",
+        savedTo: "repair_photos / technician_notes / warranty_acceptances",
+        details: [`AI decision: ${flow.aiNotes.warranty}`, formatAgentUsage(flow.aiUsage.warranty)],
+      },
+      {
+        agent: nextAgents[3].name,
+        inputFrom: "Warranty acceptance handoff",
+        action: "Created/read Square Sandbox payment and compared payment amount",
+        decision: nextAgents[3].decision,
+        handoffTo: "Review Follow-up Agent",
+        savedTo: "raw_square_events / square_events_cleaned / payments",
+        details: [
+          `AI decision: ${flow.aiNotes.payment}`,
+          formatAgentUsage(flow.aiUsage.payment),
+          `Warranty status: ${flow.warranty}`,
+          `Requested amount: ${flow.repairEstimate}`,
+          `Square status: ${flow.squareStatus}`,
+          `Square amount: ${flow.squareAmount}`,
+          `Payment ID: ${flow.squarePaymentId}`,
+          `Receipt number: ${flow.squareReceiptNumber}`,
+          `Card source: ${flow.squareCardSummary}`,
+          `Receipt issued: ${flow.squareReceiptIssuedAt || "Waiting"}`,
+          `Review handoff: ${flow.paymentReleasedToReview ? "released" : "waiting for staff review"}`,
         ],
       },
-      messages: [
-        ...selected.messages,
-        {
-          speaker: "agent",
-          label: "Complete",
-          text: "Staff approved the ticket. Warranty acceptance, repaired-device pickup confirmation, and follow-up draft are complete.",
-        },
-      ],
-    });
-    finishLiveMonitor("Ticket completed and saved locally");
+      {
+        agent: nextAgents[4].name,
+        inputFrom: "Confirmed payment event",
+        action: "Processed thank-you and Google review follow-up email",
+        decision: nextAgents[4].decision,
+        handoffTo: "Staff dashboard",
+        savedTo: "review_requests / agent_activity_logs",
+        details: [`AI decision: ${flow.aiNotes.review}`, formatAgentUsage(flow.aiUsage.review)],
+      },
+    ];
+
+    const completedCount =
+      flow.reviewFollowUp === "Sent" || flow.reviewFollowUp === "Queued"
+        ? 5
+        : isPaid && flow.paymentReleasedToReview
+          ? 4
+          : isWarrantySigned
+            ? 3
+            : pickupEmailSent
+              ? 2
+              : hasBeforePhoto
+                ? 1
+                : 0;
+    const activeIndex = completedCount >= 5 ? 4 : completedCount;
+
+    return { activeIndex, completedCount, loopEvents, nextAgents };
   };
 
-  const stepStates: StepState[] = steps.map((_, index) => {
-    const order: FlowStage[] = ["problem", "device", "estimate", "ready", "agreement", "approval", "complete"];
-    const position = selected.stage === "idle" ? 0 : order.indexOf(selected.stage);
-    if (selected.stage === "complete") return "complete";
-    if (index < Math.max(0, position - 1)) return "complete";
-    if (index === Math.max(0, position - 1)) return "active";
-    return "pending";
-  });
+  const applyAgentProgress = (flow: RepairFlowState) => {
+    const progress = buildAgentProgress(flow);
+    setAgentWorkers(
+      progress.nextAgents.map((agent, index) => ({
+        ...agent,
+        status: index < progress.completedCount ? "done" : index === progress.activeIndex ? "active" : "idle",
+      })),
+    );
+    setAgentLoopEvents(progress.loopEvents.slice(0, progress.completedCount));
+  };
+
+  const appendWorkflowMessage = (label: string, text: string) => {
+    if (!selected.id) return;
+    setSessions((current) =>
+      current.map((session) =>
+        session.id === selected.id
+          ? {
+              ...session,
+              messages: [
+                ...session.messages,
+                {
+                  speaker: "agent",
+                  label,
+                  text,
+                },
+              ],
+            }
+          : session,
+      ),
+    );
+  };
+
+  const runWorkflowAction = async (
+    action: "before_photo" | "pickup_email" | "after_photo" | "warranty_acceptance" | "review_request",
+  ) => {
+    setIsWorkflowWriting(true);
+    const technicianProof = "Screen replaced. Display, touch, camera, speaker, and charging tested.";
+    const monitorLabels =
+      action === "before_photo"
+        ? ["Repair Agent received drop-off record", "Recorded before photo proof", "Updated repair case database"]
+        : action === "pickup_email"
+          ? ["Pickup Email Agent checked before photo", "Sent or queued pickup email", "Stored email event"]
+          : action === "after_photo"
+            ? ["Warranty Agent checked pickup email", "Recorded after photo proof", "Stored technician test note"]
+            : action === "warranty_acceptance"
+              ? ["Warranty Agent checked after photo", "Captured customer pickup signature", "Stored warranty acceptance"]
+              : ["Review Agent checked payment", "Sent or queued review email", "Stored review request"];
+    beginLiveMonitor(monitorLabels);
+
+    try {
+      const response = await fetch("/api/repair-workflow", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          action,
+          ticketId: workflowTicketId,
+          customerName: privateCustomer.trim() || repairFlow.customerLabel,
+          customerEmail: selected.customerEmail || privateEmail.trim() || repairFlow.customerEmail,
+          device: repairFlow.device,
+          issue: repairFlow.issue,
+          repairSummary:
+            action === "after_photo" && repairFlow.technicianNote !== "Waiting for repair result."
+              ? repairFlow.technicianNote
+              : action === "after_photo"
+                ? technicianProof
+                : repairFlow.technicianNote,
+        }),
+      });
+      if (!response.ok) throw new Error("Workflow endpoint failed");
+
+      const payload = (await response.json()) as {
+        aiDecision?: {
+          decision?: string;
+          reason?: string;
+          nextAction?: string;
+          modelMode?: string;
+          subject?: string;
+          customerMessage?: string;
+          warrantyStatement?: string;
+          usage?: AgentTokenUsage;
+        };
+        emailEvent?: { status?: string; provider?: string; provider_message_id?: string; error?: string };
+        warrantyAcceptance?: { status?: string; signed_at?: string };
+        reviewRequest?: { status?: string; provider?: string; provider_message_id?: string; error?: string };
+        photoRecord?: { photo_type?: string; file_label?: string };
+        technicianNote?: { note_text?: string };
+        databaseWrites?: Array<{ fileName?: string; operation?: string; totalRecords?: number }>;
+      };
+      const receipt =
+        payload.databaseWrites
+          ?.map((write) => `${write.operation} ${write.fileName} (${write.totalRecords} rows)`)
+          .join(" · ") || "Stored workflow event in local database files.";
+      const aiNote = payload.aiDecision
+        ? `${payload.aiDecision.modelMode ?? "AI"} decided ${
+            payload.aiDecision.decision ?? "decision_saved"
+          }: ${
+            payload.aiDecision.reason ?? "Reason saved."
+          }${
+            payload.aiDecision.customerMessage
+              ? ` Generated message: ${payload.aiDecision.customerMessage}`
+              : payload.aiDecision.warrantyStatement
+                ? ` Generated warranty: ${payload.aiDecision.warrantyStatement}`
+                : ""
+          }`
+        : "";
+      const aiUsage = payload.aiDecision?.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+
+      setRepairFlow((current) => {
+        const nextAiNotes = {
+          ...current.aiNotes,
+          ...(action === "before_photo" && aiNote ? { repair: aiNote } : {}),
+          ...(action === "pickup_email" && aiNote ? { pickup: aiNote } : {}),
+          ...((action === "after_photo" || action === "warranty_acceptance") && aiNote ? { warranty: aiNote } : {}),
+          ...(action === "review_request" && aiNote ? { review: aiNote } : {}),
+        };
+        const nextAiUsage = {
+          ...current.aiUsage,
+          ...(action === "before_photo" ? { repair: aiUsage } : {}),
+          ...(action === "pickup_email" ? { pickup: aiUsage } : {}),
+          ...((action === "after_photo" || action === "warranty_acceptance") ? { warranty: aiUsage } : {}),
+          ...(action === "review_request" ? { review: aiUsage } : {}),
+        };
+        const nextFlow =
+          action === "before_photo"
+            ? {
+                ...current,
+                aiNotes: nextAiNotes,
+                aiUsage: nextAiUsage,
+                ticketId: workflowTicketId,
+                customerLabel: privateCustomer.trim() || current.customerLabel,
+                customerEmail: selected.customerEmail || privateEmail.trim() || current.customerEmail,
+                beforePhoto: "Uploaded" as const,
+              }
+            : action === "pickup_email"
+            ? {
+                ...current,
+                aiNotes: nextAiNotes,
+                aiUsage: nextAiUsage,
+                ticketId: workflowTicketId,
+                customerLabel: privateCustomer.trim() || current.customerLabel,
+                customerEmail: selected.customerEmail || privateEmail.trim() || current.customerEmail,
+                pickupEmail:
+                  payload.emailEvent?.status === "sent"
+                    ? ("Sent" as const)
+                    : payload.emailEvent?.status === "send_failed"
+                      ? ("Failed" as const)
+                      : ("Queued" as const),
+                pickupEmailReceipt: receipt,
+              }
+            : action === "after_photo"
+              ? {
+                  ...current,
+                  aiNotes: nextAiNotes,
+                  aiUsage: nextAiUsage,
+                  ticketId: workflowTicketId,
+                  afterPhoto: "Uploaded" as const,
+                  technicianNote:
+                    repairFlow.technicianNote !== "Waiting for repair result." ? repairFlow.technicianNote : technicianProof,
+                  warrantyReceipt: receipt,
+                }
+            : action === "warranty_acceptance"
+              ? {
+                  ...current,
+                  aiNotes: nextAiNotes,
+                  aiUsage: nextAiUsage,
+                  ticketId: workflowTicketId,
+                  pickup: "Picked up" as const,
+                  warranty: "Signed" as const,
+                  warrantyReceipt: receipt,
+                }
+              : {
+                  ...current,
+                  aiNotes: nextAiNotes,
+                  aiUsage: nextAiUsage,
+                  ticketId: workflowTicketId,
+                  reviewFollowUp:
+                    payload.reviewRequest?.status === "sent"
+                      ? ("Sent" as const)
+                      : payload.reviewRequest?.status === "send_failed"
+                        ? ("Failed" as const)
+                        : ("Queued" as const),
+                  reviewReceipt: receipt,
+                };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
+      if (selected.id && action === "before_photo") {
+        const updatedDraft = {
+          ...selected.draft,
+          beforePhotoPresent: true,
+          beforeNote: selected.draft.issue,
+        };
+        const updatedRecord = makeRecord(updatedDraft, selected.id);
+        const updatedResult = localAgent(updatedRecord, result.modelMode);
+        updateSelected({
+          draft: updatedDraft,
+          record: updatedRecord,
+          result: updatedResult,
+          stage: "ready",
+          status: "Waiting for technician",
+        });
+      }
+      if (selected.id && action === "pickup_email") {
+        updateSelected({
+          stage: "afterProof",
+          status: "Missing docs",
+        });
+      }
+      if (selected.id && action === "after_photo") {
+        const updatedDraft = {
+          ...selected.draft,
+          beforePhotoPresent: true,
+          technicianNote:
+            repairFlow.technicianNote !== "Waiting for repair result." ? repairFlow.technicianNote : technicianProof,
+        };
+        const updatedRecord = {
+          ...makeRecord(updatedDraft, selected.id),
+          afterPhotoPresent: true,
+        };
+        const updatedResult = localAgent(updatedRecord, result.modelMode);
+        updateSelected({
+          draft: updatedDraft,
+          record: updatedRecord,
+          result: updatedResult,
+          stage: "agreement",
+          status: "Warranty agreement",
+        });
+      }
+      if (selected.id && action === "warranty_acceptance") {
+        updateSelected({
+          stage: "complete",
+          status: "Complete",
+          record: { ...record, stage: "Picked up", pickupConfirmed: true },
+        });
+      }
+      const formatEmailDelivery = (event?: { status?: string; provider?: string; error?: string }) => {
+        if (!event) return "unknown";
+        if (event.status === "sent") return "sent";
+        if (event.status === "local_outbox") return "queued";
+        if (event.status === "send_failed") return "failed";
+        return event.status ?? "unknown";
+      };
+      const emailDelivery =
+        action === "pickup_email"
+          ? formatEmailDelivery(payload.emailEvent)
+          : action === "review_request"
+            ? formatEmailDelivery(payload.reviewRequest)
+            : "";
+      const workflowMessages = {
+        before_photo: `Before photo proof recorded for ${workflowTicketId}.`,
+        pickup_email: `Pickup Email Agent generated the pickup message with AI and email ${emailDelivery}.`,
+        after_photo: `Warranty Agent used AI to review after-proof and technician notes. After photo proof recorded.`,
+        warranty_acceptance: `Warranty Agent generated the warranty acceptance statement with AI. Handoff to Square Payment Agent.`,
+        review_request: `Review Follow-up Agent generated the review message with AI and email ${emailDelivery}.`,
+      };
+      appendWorkflowMessage(activeAgent.name, workflowMessages[action]);
+      finishLiveMonitor("Database write confirmed");
+    } catch {
+      setRepairFlow((current) => {
+        const nextFlow =
+          action === "before_photo"
+            ? { ...current, beforePhoto: "Missing" as const }
+            : action === "pickup_email"
+            ? { ...current, pickupEmail: "Failed" as const, pickupEmailReceipt: "Pickup email was not stored." }
+            : action === "after_photo"
+              ? { ...current, afterPhoto: "Missing" as const, warrantyReceipt: "After photo was not stored." }
+            : action === "warranty_acceptance"
+              ? { ...current, warrantyReceipt: "Warranty acceptance was not stored." }
+              : { ...current, reviewFollowUp: "Failed" as const, reviewReceipt: "Review request was not stored." };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
+      appendWorkflowMessage(activeAgent.name, "The agent action failed, so no database write was confirmed.");
+      finishLiveMonitor("Database write failed");
+    } finally {
+      setIsWorkflowWriting(false);
+    }
+  };
+
+  const receiveSquarePayment = async () => {
+    setIsSquareIngesting(true);
+    beginLiveMonitor([
+      "Payment Agent checked warranty signature",
+      "Sent repair estimate to Square Sandbox",
+      "Received sandbox card payment response",
+      "Generated internal receipt record",
+      "Stored payment database records",
+    ]);
+
+    try {
+      const params = new URLSearchParams({
+        ticketId: workflowTicketId,
+        amountCents: String(moneyTextToCents(repairFlow.repairEstimate)),
+      });
+      const response = await fetch(`/api/square-sandbox?${params.toString()}`);
+      if (!response.ok) throw new Error("Square Sandbox endpoint failed");
+
+      const payload = (await response.json()) as {
+        source?: string;
+        aiDecision?: { decision?: string; reason?: string; nextAction?: string; modelMode?: string; usage?: AgentTokenUsage };
+        cleanedPayment?: {
+          eventId?: string;
+          eventType?: string;
+          merchantId?: string;
+          paymentId?: string;
+          amountDisplay?: string;
+          status?: "APPROVED" | "PENDING" | "COMPLETED";
+          sourceType?: string;
+          receiptUrl?: string;
+          receiptNumber?: string;
+          cardLast4?: string;
+          cardBrand?: string;
+        };
+        databaseWrites?: Array<{
+          fileName?: string;
+          operation?: string;
+          totalRecords?: number;
+        }>;
+      };
+      const payment = payload.cleanedPayment;
+      const receipt =
+        payload.databaseWrites
+          ?.map((write) => `${write.operation} ${write.fileName} (${write.totalRecords} rows)`)
+          .join(" · ") || "Stored Square event in local database files.";
+      const aiNote = payload.aiDecision
+        ? `${payload.aiDecision.modelMode ?? "AI"} decided ${
+            payload.aiDecision.decision ?? "payment_checked"
+          }: ${
+            payload.aiDecision.reason ?? "Payment reasoning saved."
+          }`
+        : "";
+      const aiUsage = payload.aiDecision?.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
+
+      setRepairFlow((current) => {
+        const nextFlow = {
+          ...current,
+          aiNotes: {
+            ...current.aiNotes,
+            ...(aiNote ? { payment: aiNote } : {}),
+          },
+          aiUsage: {
+            ...current.aiUsage,
+            payment: aiUsage,
+          },
+          squareSource: payload.source || current.squareSource,
+          squareEventId: payment?.eventId || squareOfficialPaymentEvent.squareEventId,
+          squareEventType: payment?.eventType || squareOfficialPaymentEvent.squareEventType,
+          squareMerchantId: payment?.merchantId || current.squareMerchantId,
+          squarePaymentId: payment?.paymentId || squareOfficialPaymentEvent.squarePaymentId,
+          squareAmount: payment?.amountDisplay || squareOfficialPaymentEvent.squareAmount,
+          squareStatus: payment?.status || squareOfficialPaymentEvent.squareStatus,
+          squareSourceType: payment?.sourceType || current.squareSourceType,
+          squareReceiptUrl: payment?.receiptUrl || current.squareReceiptUrl,
+          squareReceiptNumber: payment?.receiptNumber || current.squareReceiptNumber,
+          squareCardSummary:
+            payment?.cardLast4 || payment?.cardBrand
+              ? `${payment.cardBrand || "Card"} ending ${payment.cardLast4 || "unknown"}`
+              : current.squareCardSummary,
+          squareReceiptIssuedAt: new Date().toLocaleString(),
+          paymentReleasedToReview: false,
+          squareDatabaseReceipt: receipt,
+          payment: "Paid" as const,
+        };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
+      appendWorkflowMessage(
+        "Square Payment Agent",
+        `Square payment ${payment?.status?.toLowerCase() ?? "processed"}. Receipt and payment record saved.`,
+      );
+      finishLiveMonitor("Square payment database write confirmed");
+    } catch {
+      setRepairFlow((current) => {
+        const nextFlow = {
+          ...current,
+          ...squareOfficialPaymentEvent,
+          squareSource: "Square Sandbox fallback event",
+          squareDatabaseReceipt: "Fallback Square event used; local database write was not confirmed.",
+        };
+        applyAgentProgress(nextFlow);
+        return nextFlow;
+      });
+      appendWorkflowMessage("Square Payment Agent", "Square fallback event was used; database write was not confirmed.");
+      finishLiveMonitor("Square payment database write failed");
+    } finally {
+      setIsSquareIngesting(false);
+    }
+  };
+
+  const confirmPickupAndWarranty = () => {
+    void runWorkflowAction("warranty_acceptance");
+  };
 
   if (!isAccessUnlocked) {
     return (
       <main className={`${styles.page} ${styles.accessPage}`}>
         <section className={styles.accessCard}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className={styles.accessLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" />
+          <Image className={styles.accessLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" width={220} height={90} priority />
           <p className={styles.sectionLabel}>Protected class demo</p>
           <h1>RepairOps AI dashboard</h1>
           <p>
@@ -1178,8 +2054,7 @@ export default function Home() {
     <main className={styles.page}>
       <header className={styles.hero}>
         <div className={styles.heroBrand}>
-          {/* eslint-disable-next-line @next/next/no-img-element */}
-          <img className={styles.brandLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" />
+          <Image className={styles.brandLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" width={220} height={90} priority />
           <div>
             <p className={styles.kicker}>Talk N Fix</p>
             <h1>
@@ -1192,17 +2067,6 @@ export default function Home() {
         </a>
       </header>
 
-      <section className={styles.steps} aria-label="Dashboard workflow steps">
-        {steps.map((step, index) => (
-          <div className={`${styles.step} ${styles[stepStates[index]]}`} key={step}>
-            <strong>
-              <span>{stepStates[index] === "complete" ? "✓" : index + 1}</span>
-            </strong>
-            <span>{step}</span>
-          </div>
-        ))}
-      </section>
-
       <section className={styles.layout}>
         <aside className={styles.recordsPanel}>
           <div className={styles.privateBox}>
@@ -1213,6 +2077,9 @@ export default function Home() {
                 <h2>Private customer info</h2>
               </div>
             </div>
+            <p className={styles.commandIntro}>
+              This information starts the shared team chat. The same chat follows each active agent.
+            </p>
             <label className={styles.formField}>
               <span>Customer name</span>
               <input
@@ -1229,7 +2096,15 @@ export default function Home() {
                 placeholder="856-555-1842"
               />
             </label>
-            <small>Enter this before opening the agent. Name and phone stay local.</small>
+            <label className={styles.formField}>
+              <span>Email for pickup notification</span>
+              <input
+                value={privateEmail}
+                onChange={(event) => setPrivateEmail(event.target.value)}
+                placeholder="customer@email.com"
+              />
+            </label>
+            <small>Enter this before opening the agent. Name and phone stay local; email is used only for pickup/review workflow.</small>
           </div>
           <button
             className={styles.intakeButton}
@@ -1243,21 +2118,32 @@ export default function Home() {
             Clear saved tickets
           </button>
           <p className={styles.sectionLabel}>Repair tickets · Saved locally</p>
-          {sessions.map((session) => (
-            <button
-              className={`${styles.recordButton} ${session.id === selectedId ? styles.selectedRecord : ""}`}
-              key={session.id}
-              type="button"
-              onClick={() => {
-                setSelectedId(session.id);
-                setAnswer("");
-              }}
-            >
-              <span>{session.id}</span>
-              <strong>{session.record.device}</strong>
-              <small>{session.status}</small>
-            </button>
-          ))}
+          {sessions.length === 0 ? <p className={styles.emptyState}>No repair tickets yet.</p> : null}
+          {sessions.map((session) => {
+            const queueState = queueStateFor(session);
+            return (
+              <button
+                className={`${styles.recordButton} ${session.id === selectedId ? styles.selectedRecord : ""}`}
+                key={session.id}
+                type="button"
+                onClick={() => {
+                  const nextFlow = flowFromSession(session);
+                  setRepairFlow(nextFlow);
+                  applyAgentProgress(nextFlow);
+                  setSelectedId(session.id);
+                  setAnswer("");
+                }}
+              >
+                <span>{session.id}</span>
+                <strong>{session.record.device}</strong>
+                <small>{session.status}</small>
+                <em>
+                  {queueState.agent}
+                  <b>{queueState.detail}</b>
+                </em>
+              </button>
+            );
+          })}
         </aside>
 
         <section className={styles.recordPanel}>
@@ -1314,14 +2200,23 @@ export default function Home() {
             </article>
             <article>
               <p className={styles.sectionLabel}>Missing documentation</p>
-              {result.missingFields.length ? (
+              {documentChecklist.length ? (
                 <ul className={styles.missingList}>
-                  {result.missingFields.map((field) => (
-                    <li key={field}>{field}</li>
+                  {documentChecklist.map((field) => (
+                    <li className={field.done ? styles.docDone : styles.docMissing} key={field.label}>
+                      <strong>{field.done ? "Done" : "Missing"}</strong>
+                      <span>{field.label}</span>
+                    </li>
                   ))}
                 </ul>
+              ) : null}
+              {documentChecklist.length && missingDocuments.length === 0 ? (
+                <p className={styles.emptyState}>All required documentation is complete for this stage.</p>
+              ) : null}
+              {!documentChecklist.length ? (
+                <p className={styles.emptyState}>Create or select a ticket to see required documentation.</p>
               ) : (
-                <p className={styles.emptyState}>No missing documentation found.</p>
+                null
               )}
             </article>
           </div>
@@ -1345,43 +2240,53 @@ export default function Home() {
         <section className={styles.agentPanel}>
           <div className={styles.agentGlow}></div>
           <div className={styles.agentHeader}>
-            <div className={styles.agentAvatar} aria-hidden="true">
-              <span className={styles.techCap}></span>
-              <span className={styles.techFace}></span>
-              <span className={styles.techTool}></span>
+            <div className={styles.teamAvatarGroup} aria-hidden="true">
+              {agentWorkers.map((agent, index) => (
+                <span className={`${styles.teamAvatar} ${styles[`agentPortrait${index}`]} ${styles[`loop${agent.status}`]}`} key={agent.name}>
+                  <span className={styles.teamSignal}></span>
+                  <span className={styles.teamHead}></span>
+                  <span className={styles.teamBody}></span>
+                  <i>{index + 1}</i>
+                </span>
+              ))}
             </div>
             <div>
-              <p className={styles.sectionLabel}>AI agent console</p>
-              <h2>Repair Ticket Agent</h2>
+              <p className={styles.sectionLabel}>Command center</p>
+              <h2>RepairOps team chat</h2>
+              <small className={styles.teamChatHint}>One chat controls the active agent in the workflow above.</small>
             </div>
           </div>
 
-          <div className={styles.modelStrip}>
-            <span>Agent runtime</span>
-            <strong>{result.modelMode}</strong>
-          </div>
-
-          <div className={styles.liveMonitor}>
-            <div className={styles.timelineHeader}>
-              <p className={styles.sectionLabel}>Live agent monitor</p>
-              <button className={styles.monitorToggle} type="button" onClick={() => setIsMonitorOpen((current) => !current)}>
-                {isMonitorOpen ? "Hide" : isRunning ? "Running" : "Show"}
-              </button>
+          {selected.id ? (
+            <div className={styles.modelStrip}>
+              <span>Active agent</span>
+              <strong>{activeAgent.name}</strong>
             </div>
-            {isMonitorOpen ? (
-              liveMonitorSteps.map((step, index) => (
-                <div className={`${styles.liveStep} ${styles[step.status]}`} key={`${step.label}-${index}`}>
-                  <strong>{step.status === "done" ? "✓" : index + 1}</strong>
-                  <span>{step.label}</span>
-                </div>
-              ))
-            ) : (
-              <div className={`${styles.liveStep} ${isRunning ? styles.active : styles.done}`}>
-                <strong>{isRunning ? "…" : "✓"}</strong>
-                <span>{liveMonitorSteps.find((step) => step.status === "active")?.label ?? liveMonitorSteps.at(-1)?.label}</span>
+          ) : null}
+
+          {selected.id ? (
+            <div className={styles.liveMonitor}>
+              <div className={styles.timelineHeader}>
+                <p className={styles.sectionLabel}>Live agent monitor</p>
+                <button className={styles.monitorToggle} type="button" onClick={() => setIsMonitorOpen((current) => !current)}>
+                  {isMonitorOpen ? "Hide" : isRunning ? "Running" : "Show"}
+                </button>
               </div>
-            )}
-          </div>
+              {isMonitorOpen ? (
+                liveMonitorSteps.map((step, index) => (
+                  <div className={`${styles.liveStep} ${styles[step.status]}`} key={`${step.label}-${index}`}>
+                    <strong>{step.status === "done" ? "✓" : index + 1}</strong>
+                    <span>{step.label}</span>
+                  </div>
+                ))
+              ) : (
+                <div className={`${styles.liveStep} ${isRunning ? styles.active : styles.done}`}>
+                  <strong>{isRunning ? "…" : "✓"}</strong>
+                  <span>{liveMonitorSteps.find((step) => step.status === "active")?.label ?? liveMonitorSteps.at(-1)?.label}</span>
+                </div>
+              )}
+            </div>
+          ) : null}
 
           <div className={styles.chatBox} ref={chatBoxRef}>
             {selected.messages.map((message, index) => (
@@ -1389,22 +2294,26 @@ export default function Home() {
                 className={message.speaker === "agent" ? styles.agentBubble : styles.userBubble}
                 key={`${message.label}-${index}`}
               >
-                <span>{message.label}</span>
+                <span>{message.speaker === "agent" ? "RepairOps team" : message.label}</span>
                 <p>{message.text}</p>
               </div>
             ))}
             {isRunning ? (
               <div className={styles.agentBubble}>
-                <span>Agent working</span>
+                <span>{activeAgent.name} working</span>
                 <p>Analyzing readiness note, checking risk, and drafting warranty output...</p>
               </div>
             ) : null}
           </div>
 
-          {selected.stage !== "idle" && selected.stage !== "agreement" && selected.stage !== "approval" && selected.stage !== "complete" ? (
+          {selected.stage !== "idle" &&
+          selected.stage !== "pickupEmail" &&
+          selected.stage !== "afterProof" &&
+          selected.stage !== "agreement" &&
+          selected.stage !== "complete" ? (
             <>
               <label className={styles.instructionBox}>
-                <span>Answer the agent</span>
+                <span>Reply to team chat</span>
                 <textarea
                   value={answer}
                   onChange={(event) => setAnswer(event.target.value)}
@@ -1419,93 +2328,277 @@ export default function Home() {
             </>
           ) : null}
 
-          {selected.stage === "idle" ? (
-            <button className={styles.runButton} type="button" onClick={continueSelectedTicket} disabled={isRunning}>
+          {selected.id && selected.stage === "idle" ? (
+            <button
+              className={styles.runButton}
+              type="button"
+              onClick={continueSelectedTicket}
+              disabled={isRunning || !selected.id}
+            >
               Continue selected ticket
             </button>
           ) : null}
 
-          <button className={styles.secondaryDarkButton} type="button" onClick={() => deleteTicket(selected.id)}>
-            Delete selected ticket
-          </button>
-
-          <div className={styles.taskCard}>
-            <div>
-              <p className={styles.sectionLabel}>Generated staff task</p>
-              <h3>{result.staffTask.title}</h3>
-            </div>
-            <dl>
-              <div>
-                <dt>Priority</dt>
-                <dd>{result.staffTask.priority}</dd>
-              </div>
-              <div>
-                <dt>Owner</dt>
-                <dd>{result.staffTask.owner}</dd>
-              </div>
-              <div>
-                <dt>Status</dt>
-                <dd>{selected.status}</dd>
-              </div>
-            </dl>
-            <button type="button" onClick={approveTicket} disabled={selected.stage !== "approval"}>
-              Staff approve
+          {selected.id ? (
+            <button
+              className={styles.secondaryDarkButton}
+              type="button"
+              onClick={() => deleteTicket(selected.id)}
+            >
+              Delete selected ticket
             </button>
-          </div>
+          ) : null}
 
-          <div className={styles.summaryBox}>
-            <p className={styles.sectionLabel}>Warranty summary</p>
-            <span>{result.warrantySummary}</span>
-          </div>
-
-          <div className={styles.summaryBox}>
-            <p className={styles.sectionLabel}>Follow-up draft</p>
-            <span>{result.followUpDraft}</span>
-          </div>
-
-          <div className={styles.usageGrid}>
-            <div>
-              <span>Prompt</span>
-              <strong>{result.promptTokens}</strong>
-            </div>
-            <div>
-              <span>Output</span>
-              <strong>{result.outputTokens}</strong>
-            </div>
-            <div>
-              <span>Cost</span>
-              <strong>${estimatedCost}</strong>
-            </div>
-            <div>
-              <span>Runtime</span>
-              <strong>{result.runtimeMs}ms</strong>
-            </div>
-          </div>
-
-          <div className={styles.timelinePanel}>
-            <div className={styles.timelineHeader}>
-              <p className={styles.sectionLabel}>Activity audit log</p>
-              <span>{isRunning ? "Running" : "Saved"}</span>
-            </div>
-            {result.logs.map((log, index) => (
-              <div className={styles.timelineStep} key={`${log}-${index}`}>
-                <strong>{index + 1}</strong>
-                <span>{log}</span>
+          {selected.id ? (
+            <>
+              <div className={styles.usageGrid}>
+                <div>
+                  <span>Prompt</span>
+                  <strong>{result.promptTokens}</strong>
+                </div>
+                <div>
+                  <span>Output</span>
+                  <strong>{result.outputTokens}</strong>
+                </div>
+                <div>
+                  <span>Cost</span>
+                  <strong>${approximateCost}</strong>
+                </div>
+                <div>
+                  <span>Runtime</span>
+                  <strong>{result.runtimeMs}ms</strong>
+                </div>
               </div>
-            ))}
-            {selected.agreementName ? (
-              <div className={styles.timelineStep}>
-                <strong>{result.logs.length + 1}</strong>
-                <span>
-                  Warranty acceptance saved for {selected.agreementName} on {selected.agreementAcceptedAt}. Customer
-                  confirmed they received the repaired device in working condition.
-                </span>
-              </div>
-            ) : null}
-          </div>
+            </>
+          ) : null}
 
         </section>
       </section>
+
+      {selected.id ? (
+      <section className={styles.agenticLabPanel}>
+        <div className={styles.labHeader}>
+          <div>
+            <p className={styles.sectionLabel}>Operations workspace</p>
+            <h2>Agent workflow</h2>
+            <span>One active agent at a time. The log records each handoff.</span>
+          </div>
+        </div>
+
+        <div className={styles.agentStepRail} aria-label="Agent loop steps">
+          {agentWorkers.map((agent, index) => (
+            <div
+              className={`${styles.agentStepButton} ${styles[`loop${agent.status}`]}`}
+              key={agent.name}
+            >
+              <strong>
+                <span className={styles.miniAgent}>
+                  <span></span>
+                </span>
+                <i>{agent.status === "done" ? "✓" : index + 1}</i>
+              </strong>
+              <span>{agent.name}</span>
+            </div>
+          ))}
+        </div>
+
+        <article className={`${styles.activeAgentPanel} ${styles[`loop${activeAgent.status}`]}`}>
+          <div className={styles.activeAgentHeader}>
+            <div className={`${styles.agentFigure} ${styles.compactFigure} ${styles[`agentFigure${activeAgentIndex}`]} ${styles[`agentPortrait${activeAgentIndex}`]}`}>
+              <span className={styles.agentSignal}></span>
+              <span className={styles.agentHead}></span>
+              <span className={styles.agentBody}></span>
+              <span className={styles.agentTool}></span>
+            </div>
+            <div>
+              <p className={styles.sectionLabel}>{activeAgent.domain}</p>
+              <h3>{activeAgent.name}</h3>
+            </div>
+          </div>
+
+          <div className={styles.activeAgentSummary}>
+            <span>Decision</span>
+            <strong>{activeAgent.decision}</strong>
+          </div>
+
+          {activeAgentIndex === 3 ? (
+            <div className={styles.agentDecisionList}>
+              <span>Payment Agent tool plan</span>
+              <p className={repairFlow.warranty === "Signed" ? styles.doneCheck : ""}>
+                Check warranty signature before payment
+              </p>
+              <p className={repairFlow.warranty === "Signed" ? styles.doneCheck : ""}>
+                Send ticket estimate to Square Sandbox
+              </p>
+              <p className={repairFlow.payment === "Paid" ? styles.doneCheck : ""}>
+                Read payment status, amount, card source, and receipt
+              </p>
+              <p className={repairFlow.payment === "Paid" ? styles.doneCheck : ""}>
+                Store raw event, cleaned event, payment record, and ETL run
+              </p>
+              <p className={repairFlow.payment === "Paid" ? styles.doneCheck : ""}>
+                Decide whether to hand off to Review Follow-up Agent
+              </p>
+            </div>
+          ) : null}
+
+          {(activeAgentIndex === 0 || activeAgentIndex === 2) ? (
+            <div className={styles.photoProofStrip}>
+              <span>Before photo: {repairFlow.beforePhoto}</span>
+              <span>After photo: {repairFlow.afterPhoto}</span>
+            </div>
+          ) : null}
+
+          <div className={styles.activeAgentAction}>
+            {activeAgentIndex === 0 ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void runWorkflowAction("before_photo")}
+                  disabled={repairFlow.beforePhoto === "Uploaded" || isWorkflowWriting}
+                >
+                  {isWorkflowWriting ? "Saving..." : "Record before proof"}
+                </button>
+              </>
+            ) : null}
+            {activeAgentIndex === 1 ? (
+              <button
+                type="button"
+                onClick={() => void runWorkflowAction("pickup_email")}
+                disabled={
+                  repairFlow.beforePhoto !== "Uploaded" ||
+                  repairFlow.technicianNote === "Waiting for repair result." ||
+                  repairFlow.pickupEmail === "Sent" ||
+                  repairFlow.pickupEmail === "Queued" ||
+                  isWorkflowWriting
+                }
+              >
+                {isWorkflowWriting
+                  ? "Sending..."
+                  : repairFlow.technicianNote === "Waiting for repair result."
+                    ? "Waiting for ready note"
+                    : "Send pickup email"}
+              </button>
+            ) : null}
+            {activeAgentIndex === 2 ? (
+              <>
+                <button
+                  type="button"
+                  onClick={() => void runWorkflowAction("after_photo")}
+                  disabled={(repairFlow.pickupEmail !== "Sent" && repairFlow.pickupEmail !== "Queued") || repairFlow.afterPhoto === "Uploaded" || isWorkflowWriting}
+                >
+                  {isWorkflowWriting ? "Saving..." : "Record after proof"}
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmPickupAndWarranty}
+                  disabled={repairFlow.afterPhoto !== "Uploaded" || repairFlow.pickup === "Picked up" || isWorkflowWriting}
+                >
+                  Sign warranty
+                </button>
+              </>
+            ) : null}
+            {activeAgentIndex === 3 ? (
+              <>
+                <button
+                  type="button"
+                  onClick={receiveSquarePayment}
+                  disabled={repairFlow.warranty !== "Signed" || repairFlow.payment === "Paid" || isSquareIngesting}
+                >
+                  {isSquareIngesting ? "Reading..." : "Read Square webhook"}
+                </button>
+                <a href={repairFlow.squareSourceUrl} target="_blank" rel="noreferrer">
+                  Square source
+                </a>
+                {repairFlow.payment === "Paid" ? (
+                  <div className={styles.squareReceiptCard}>
+                    <span>Sandbox receipt record</span>
+                    <p>
+                      <b>{repairFlow.squareReceiptNumber}</b>
+                      {repairFlow.squareReceiptIssuedAt ? ` · ${repairFlow.squareReceiptIssuedAt}` : ""}
+                    </p>
+                    <p>{repairFlow.squareAmount} · {repairFlow.squareCardSummary}</p>
+                    <small>Payment ID: {repairFlow.squarePaymentId}</small>
+                  </div>
+                ) : null}
+                {repairFlow.payment === "Paid" && !repairFlow.paymentReleasedToReview ? (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setRepairFlow((current) => {
+                        const nextFlow = { ...current, paymentReleasedToReview: true };
+                        applyAgentProgress(nextFlow);
+                        return nextFlow;
+                      });
+                    }}
+                  >
+                    Continue to Review Agent
+                  </button>
+                ) : null}
+              </>
+            ) : null}
+            {activeAgentIndex === 4 ? (
+              <button
+                type="button"
+                onClick={() => void runWorkflowAction("review_request")}
+                disabled={repairFlow.payment !== "Paid" || repairFlow.reviewFollowUp === "Sent" || repairFlow.reviewFollowUp === "Queued" || isWorkflowWriting}
+                >
+                  {isWorkflowWriting ? "Sending..." : "Send review email"}
+                </button>
+            ) : null}
+          </div>
+        </article>
+
+        <div className={styles.agentLoopLog}>
+          <div className={styles.timelineHeader}>
+            <p className={styles.sectionLabel}>Agent team loop log</p>
+            <span>{agentLoopEvents.length ? `${agentLoopEvents.length} actions saved` : "Waiting"}</span>
+          </div>
+          {agentLoopEvents.length ? (
+            agentLoopEvents.map((event, index) => (
+              <details className={styles.loopLogRow} key={`${event.agent}-${event.decision}`}>
+                <summary>
+                  <strong>{index + 1}</strong>
+                  <span>{event.agent}</span>
+                  <b>{event.decision}</b>
+                </summary>
+                <div className={styles.loopLogBody}>
+                  <p>
+                    Received: <b>{event.inputFrom}</b>
+                  </p>
+                  <p>
+                    Action: <b>{event.action}</b>
+                  </p>
+                  <p>
+                    Decision: <b>{event.decision}</b>
+                  </p>
+                  <p>
+                    Handoff: <b>{event.handoffTo}</b>
+                  </p>
+                  {event.details?.length ? (
+                    <ul className={styles.loopDetailList}>
+                      {event.details.map((detail) => (
+                        <li key={detail}>{detail}</li>
+                      ))}
+                    </ul>
+                  ) : null}
+                  {event.receiptUrl ? (
+                    <a className={styles.loopReceiptLink} href={event.receiptUrl} target="_blank" rel="noreferrer">
+                      View Square receipt
+                    </a>
+                  ) : null}
+                  <small>Saved to {event.savedTo}</small>
+                </div>
+              </details>
+            ))
+          ) : (
+            <p className={styles.emptyState}>
+              Start inside the Repair Agent. Each completed action creates a handoff record for the next agent.
+            </p>
+          )}
+        </div>
+      </section>
+      ) : null}
 
       {selected.stage === "agreement" ? (
         <div className={styles.modalOverlay} role="dialog" aria-modal="true" aria-labelledby="warranty-title">
