@@ -191,6 +191,7 @@ type TicketSession = {
   agreementName: string;
   agreementAcceptedAt: string;
   warrantyPdfDataUrl: string;
+  repairFlow?: RepairFlowState;
 };
 
 const storageKey = "repairops-ai-ticket-sessions";
@@ -566,6 +567,11 @@ function documentationChecklist(session: TicketSession, flow: RepairFlowState) {
   const needsAfterPhoto = ["afterProof", "agreement", "complete"].includes(stage) || Boolean(session.record.afterNote);
   const needsWarranty = ["agreement", "complete"].includes(stage) || flow.afterPhoto === "Uploaded";
   const needsPayment = stage === "complete" || flow.warranty === "Signed";
+  const hasSquareConfirmation =
+    flow.payment === "Paid" &&
+    (flow.squarePaymentId !== "Not received" ||
+      flow.squareStatus === "APPROVED" ||
+      flow.squareStatus === "COMPLETED");
 
   return [
     {
@@ -594,8 +600,8 @@ function documentationChecklist(session: TicketSession, flow: RepairFlowState) {
       needed: needsWarranty,
     },
     {
-      label: "Square payment receipt",
-      done: flow.payment === "Paid" && flow.squareReceiptNumber !== "Not received",
+      label: "Square payment confirmation",
+      done: hasSquareConfirmation,
       needed: needsPayment,
     },
   ].filter((item) => item.needed);
@@ -706,6 +712,7 @@ function loadSavedSessions() {
       customerEmail: session.customerEmail ?? "",
       agreementAcceptedAt: session.agreementAcceptedAt ?? "",
       warrantyPdfDataUrl: session.warrantyPdfDataUrl ?? "",
+      repairFlow: restoreRepairFlow(session.repairFlow),
       result: session.result,
     }));
   } catch {
@@ -713,7 +720,27 @@ function loadSavedSessions() {
   }
 }
 
+function restoreRepairFlow(savedFlow?: Partial<RepairFlowState>): RepairFlowState | undefined {
+  if (!savedFlow) return undefined;
+
+  return {
+    ...initialRepairFlow,
+    ...savedFlow,
+    aiNotes: {
+      ...initialRepairFlow.aiNotes,
+      ...(savedFlow.aiNotes ?? {}),
+    },
+    aiUsage: {
+      ...initialRepairFlow.aiUsage,
+      ...(savedFlow.aiUsage ?? {}),
+    },
+  };
+}
+
 function flowFromSession(session: TicketSession): RepairFlowState {
+  const savedFlow = restoreRepairFlow(session.repairFlow);
+  if (savedFlow) return savedFlow;
+
   const isComplete = session.stage === "complete" || session.status === "Complete";
   const hasBeforeProof = session.record.beforePhotoPresent || ["ready", "pickupEmail", "afterProof", "agreement", "complete"].includes(session.stage);
   const hasTechnicianNote = Boolean(session.record.afterNote) || ["pickupEmail", "afterProof", "agreement", "complete"].includes(session.stage);
@@ -913,6 +940,18 @@ export default function Home() {
     );
   };
 
+  const commitRepairFlow = (nextFlow: RepairFlowState) => {
+    setRepairFlow(nextFlow);
+    if (!selected.id) return;
+    setSessions((current) =>
+      current.map((session) => (session.id === selected.id ? { ...session, repairFlow: nextFlow } : session)),
+    );
+  };
+
+  const updateRepairFlow = (updater: (current: RepairFlowState) => RepairFlowState) => {
+    commitRepairFlow(updater(repairFlow));
+  };
+
   const beginLiveMonitor = (labels: string[]) => {
     const runId = monitorRunRef.current + 1;
     monitorRunRef.current = runId;
@@ -990,28 +1029,6 @@ export default function Home() {
       phone: privatePhone.trim(),
     };
     const recordDraft = makeRecord(draft, id);
-    const session: TicketSession = {
-      id,
-      record: recordDraft,
-      result: localAgent(recordDraft),
-      draft,
-      customerEmail: privateEmail.trim(),
-      stage: "problem",
-      status: "Waiting for technician",
-      agreementName: "",
-      agreementAcceptedAt: "",
-      warrantyPdfDataUrl: "",
-      messages: [
-        {
-          speaker: "agent",
-          label: "Repair Ticket Agent",
-          text: "Connecting to OpenAI chat...",
-        },
-      ],
-    };
-    setSessions((current) => [session, ...current]);
-    setSelectedId(id);
-    setAnswer("");
     const startingFlow = {
       ...initialRepairFlow,
       ticketId: id,
@@ -1024,6 +1041,29 @@ export default function Home() {
       afterPhoto: "Missing" as const,
       technicianNote: "Waiting for repair result.",
     };
+    const session: TicketSession = {
+      id,
+      record: recordDraft,
+      result: localAgent(recordDraft),
+      draft,
+      customerEmail: privateEmail.trim(),
+      stage: "problem",
+      status: "Waiting for technician",
+      agreementName: "",
+      agreementAcceptedAt: "",
+      warrantyPdfDataUrl: "",
+      repairFlow: startingFlow,
+      messages: [
+        {
+          speaker: "agent",
+          label: "Repair Ticket Agent",
+          text: "Connecting to OpenAI chat...",
+        },
+      ],
+    };
+    setSessions((current) => [session, ...current]);
+    setSelectedId(id);
+    setAnswer("");
     setRepairFlow(startingFlow);
     applyAgentProgress(startingFlow);
     setPrivateCustomer("");
@@ -1218,7 +1258,7 @@ export default function Home() {
         ],
         stage: nextStage,
       });
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = { ...current, ticketId: selected.id, issue: draft.issue };
         applyAgentProgress(nextFlow);
         return nextFlow;
@@ -1328,7 +1368,7 @@ export default function Home() {
         ],
         stage: "estimate",
       });
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = { ...current, ticketId: selected.id, device: draft.device, issue: draft.issue };
         applyAgentProgress(nextFlow);
         return nextFlow;
@@ -1374,7 +1414,7 @@ export default function Home() {
         stage: "beforeProof",
         status: "Waiting for technician",
       });
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = {
           ...current,
           ticketId: selected.id,
@@ -1412,7 +1452,7 @@ export default function Home() {
     if (selected.stage === "ready") {
       draft.technicianNote = value;
       draft.beforeNote = draft.issue;
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = {
           ...current,
           ticketId: selected.id,
@@ -1591,8 +1631,12 @@ export default function Home() {
           `Square status: ${flow.squareStatus}`,
           `Square amount: ${flow.squareAmount}`,
           `Payment ID: ${flow.squarePaymentId}`,
-          `Receipt number: ${flow.squareReceiptNumber}`,
-          `Card source: ${flow.squareCardSummary}`,
+          `Receipt number: ${
+            flow.squareReceiptNumber !== "Not received" ? flow.squareReceiptNumber : "Not provided by Square Sandbox"
+          }`,
+          `Card source: ${
+            flow.squareCardSummary !== "Not received" ? flow.squareCardSummary : "Not provided by Square Sandbox"
+          }`,
           `Receipt issued: ${flow.squareReceiptIssuedAt || "Waiting"}`,
           `Review handoff: ${flow.paymentReleasedToReview ? "released" : "waiting for staff review"}`,
         ],
@@ -1732,7 +1776,7 @@ export default function Home() {
         : "";
       const aiUsage = payload.aiDecision?.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextAiNotes = {
           ...current.aiNotes,
           ...(action === "before_photo" && aiNote ? { repair: aiNote } : {}),
@@ -1883,7 +1927,7 @@ export default function Home() {
       appendWorkflowMessage(activeAgent.name, workflowMessages[action]);
       finishLiveMonitor("Database write confirmed");
     } catch {
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow =
           action === "before_photo"
             ? { ...current, beforePhoto: "Missing" as const }
@@ -1958,7 +2002,7 @@ export default function Home() {
         : "";
       const aiUsage = payload.aiDecision?.usage ?? { inputTokens: 0, outputTokens: 0, totalTokens: 0 };
 
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = {
           ...current,
           aiNotes: {
@@ -1997,7 +2041,7 @@ export default function Home() {
       );
       finishLiveMonitor("Square payment database write confirmed");
     } catch {
-      setRepairFlow((current) => {
+      updateRepairFlow((current) => {
         const nextFlow = {
           ...current,
           ...squareOfficialPaymentEvent,
@@ -2512,9 +2556,13 @@ export default function Home() {
                 </a>
                 {repairFlow.payment === "Paid" ? (
                   <div className={styles.squareReceiptCard}>
-                    <span>Sandbox receipt record</span>
+                    <span>Sandbox payment confirmation</span>
                     <p>
-                      <b>{repairFlow.squareReceiptNumber}</b>
+                      <b>
+                        {repairFlow.squareReceiptNumber !== "Not received"
+                          ? repairFlow.squareReceiptNumber
+                          : repairFlow.squareStatus}
+                      </b>
                       {repairFlow.squareReceiptIssuedAt ? ` · ${repairFlow.squareReceiptIssuedAt}` : ""}
                     </p>
                     <p>{repairFlow.squareAmount} · {repairFlow.squareCardSummary}</p>
@@ -2525,7 +2573,7 @@ export default function Home() {
                   <button
                     type="button"
                     onClick={() => {
-                      setRepairFlow((current) => {
+                      updateRepairFlow((current) => {
                         const nextFlow = { ...current, paymentReleasedToReview: true };
                         applyAgentProgress(nextFlow);
                         return nextFlow;
