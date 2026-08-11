@@ -217,7 +217,6 @@ async function readJsonArray(fileName: string): Promise<JsonRecord[]> {
 }
 
 async function upsertJsonRecord(fileName: string, record: JsonRecord, key: string) {
-  await mkdir(databaseDir, { recursive: true });
   const records = await readJsonArray(fileName);
   const recordKey = record[key];
   const existingIndex = records.findIndex((item) => item[key] === recordKey);
@@ -226,7 +225,17 @@ async function upsertJsonRecord(fileName: string, record: JsonRecord, key: strin
       ? records.map((item, index) => (index === existingIndex ? { ...item, ...record } : item))
       : [...records, record];
 
-  await writeFile(path.join(databaseDir, fileName), `${JSON.stringify(nextRecords, null, 2)}\n`);
+  try {
+    await mkdir(databaseDir, { recursive: true });
+    await writeFile(path.join(databaseDir, fileName), `${JSON.stringify(nextRecords, null, 2)}\n`);
+  } catch {
+    return {
+      fileName,
+      recordKey,
+      operation: "runtime-only",
+      totalRecords: nextRecords.length,
+    };
+  }
 
   return {
     fileName,
