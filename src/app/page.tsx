@@ -1,7 +1,6 @@
 "use client";
 
-import Image from "next/image";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { KeyboardEvent } from "react";
 import styles from "./page.module.css";
 
@@ -117,6 +116,42 @@ type AgentLoopEvent = {
   savedTo: string;
   details?: string[];
   receiptUrl?: string;
+};
+
+type DatabaseSummary = {
+  total_repairs: number;
+  active_repairs: number;
+  waiting_for_pickup: number;
+  high_risk_repairs: number;
+  estimated_repair_value: string;
+  paid_revenue: string;
+  pending_payments: number;
+  failed_payments: number;
+  payment_records_needing_review: number;
+};
+
+type DatabaseRepairRow = {
+  repair_ticket_id: string;
+  display_name: string;
+  device_model: string;
+  repair_status: string;
+  risk_level: string;
+  estimate_amount: string;
+  payment_amount: string | null;
+  payment_status: string | null;
+  needs_review: boolean | null;
+};
+
+type DatabaseSummaryResponse = {
+  connected: boolean;
+  reason?: string;
+  summary: DatabaseSummary | null;
+  repairs: DatabaseRepairRow[];
+  paymentStatus: Array<{
+    payment_status: string;
+    repair_count: number;
+    total_amount: string;
+  }>;
 };
 
 type AgentTokenUsage = {
@@ -869,6 +904,9 @@ export default function Home() {
   const [isWorkflowWriting, setIsWorkflowWriting] = useState(false);
   const [agentWorkers, setAgentWorkers] = useState<AgentWorker[]>(finalAgentTeam);
   const [agentLoopEvents, setAgentLoopEvents] = useState<AgentLoopEvent[]>([]);
+  const [databaseSummary, setDatabaseSummary] = useState<DatabaseSummaryResponse | null>(null);
+  const [isDatabaseLoading, setIsDatabaseLoading] = useState(false);
+  const [databaseWriteStatus, setDatabaseWriteStatus] = useState("Waiting for first cloud database sync.");
   const [liveMonitorSteps, setLiveMonitorSteps] = useState<LiveMonitorStep[]>([
     { label: "Waiting for staff action", status: "active" },
     { label: "Private customer fields stay local", status: "pending" },
@@ -898,6 +936,58 @@ export default function Home() {
   const activeAgent = agentWorkers[activeAgentIndex];
   const workflowTicketId = selected.id || repairFlow.ticketId;
 
+  const refreshDatabaseSummary = useCallback(async () => {
+    setIsDatabaseLoading(true);
+    try {
+      const response = await fetch("/api/database-summary");
+      const payload = (await response.json()) as DatabaseSummaryResponse;
+      setDatabaseSummary(payload);
+    } catch {
+      setDatabaseSummary({
+        connected: false,
+        reason: "Database summary request failed.",
+        summary: null,
+        repairs: [],
+        paymentStatus: [],
+      });
+    } finally {
+      setIsDatabaseLoading(false);
+    }
+  }, []);
+
+  const syncRepairTicketToCloud = useCallback(
+    async (ticketId: string, draft: IntakeForm, status: string, email = "") => {
+      setDatabaseWriteStatus(`Syncing ${ticketId} to cloud PostgreSQL...`);
+      try {
+        const response = await fetch("/api/repair-ticket-sync", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            repairTicketId: ticketId,
+            customerName: draft.customer,
+            phone: draft.phone,
+            email,
+            deviceModel: draft.device,
+            problemDescription: draft.issue,
+            estimateAmount: Number(draft.quotedPrice) || 0,
+            status,
+            riskLevel: "low",
+          }),
+        });
+        const payload = (await response.json()) as { saved?: boolean; reason?: string };
+        if (!response.ok || !payload.saved) {
+          setDatabaseWriteStatus(payload.reason || "Cloud database sync was not completed.");
+          return;
+        }
+        setDatabaseWriteStatus(`${ticketId} saved to customers, devices, and repair_tickets.`);
+        void refreshDatabaseSummary();
+      } catch {
+        setDatabaseWriteStatus("Cloud database sync failed.");
+      }
+    },
+    [refreshDatabaseSummary],
+  );
+
   useEffect(() => {
     const timer = window.setTimeout(() => {
       const savedSessions = loadSavedSessions();
@@ -922,6 +1012,14 @@ export default function Home() {
 
     return () => window.clearTimeout(timer);
   }, []);
+
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      void refreshDatabaseSummary();
+    }, 0);
+
+    return () => window.clearTimeout(timer);
+  }, [refreshDatabaseSummary]);
 
   useEffect(() => {
     if (!hasLoadedSavedTickets) return;
@@ -1077,6 +1175,8 @@ export default function Home() {
       "Asked OpenAI for the next repair-intake question",
     ]);
 
+    void syncRepairTicketToCloud(id, draft, "created_from_web_app", privateEmail.trim());
+
     const chat = await getOpenAiChatReply(
       id,
       "problem",
@@ -1149,13 +1249,37 @@ export default function Home() {
     });
   };
 
+  const removeTicketFromBrowser = (id: string) => {
+    setSessions((current) => {
+      const nextSessions = current.filter((session) => session.id !== id);
+      if (id === selectedId) {
+        setSelectedId(nextSessions[0]?.id ?? "");
+        setAnswer("");
+      }
+      return nextSessions;
+    });
+  };
+
   const deleteTicket = (id: string) => {
-    const nextSessions = sessions.filter((session) => session.id !== id);
-    setSessions(nextSessions);
-    if (id === selectedId) {
-      setSelectedId(nextSessions[0]?.id ?? "");
-      setAnswer("");
-    }
+    setDatabaseWriteStatus(`Archiving ${id} in cloud PostgreSQL...`);
+    void fetch("/api/repair-ticket-sync", {
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ repairTicketId: id }),
+    })
+      .then(async (response) => {
+        const payload = (await response.json()) as { saved?: boolean; archived?: boolean; reason?: string };
+        if (!response.ok || !payload.saved) {
+          setDatabaseWriteStatus(payload.reason || "Cloud archive was not completed.");
+          return;
+        }
+        removeTicketFromBrowser(id);
+        setDatabaseWriteStatus(payload.archived ? `${id} archived in cloud PostgreSQL.` : `${id} was local only and removed from browser.`);
+        void refreshDatabaseSummary();
+      })
+      .catch(() => {
+        setDatabaseWriteStatus("Cloud archive failed.");
+      });
   };
 
   const clearSavedTickets = () => {
@@ -1263,6 +1387,7 @@ export default function Home() {
         applyAgentProgress(nextFlow);
         return nextFlow;
       });
+      void syncRepairTicketToCloud(selected.id, draft, "problem_collected", selected.customerEmail);
       setIsRunning(true);
       beginLiveMonitor([
         "Read repair problem from chat",
@@ -1373,6 +1498,7 @@ export default function Home() {
         applyAgentProgress(nextFlow);
         return nextFlow;
       });
+      void syncRepairTicketToCloud(selected.id, draft, "device_collected", selected.customerEmail);
       setIsRunning(true);
       beginLiveMonitor([
         "Saved device model",
@@ -1426,6 +1552,7 @@ export default function Home() {
         applyAgentProgress(nextFlow);
         return nextFlow;
       });
+      void syncRepairTicketToCloud(selected.id, draft, "estimate_collected", selected.customerEmail);
       beginLiveMonitor([
         "Saved staff-entered estimate",
         "Confirmed AI did not generate the price",
@@ -2066,7 +2193,8 @@ export default function Home() {
     return (
       <main className={`${styles.page} ${styles.accessPage}`}>
         <section className={styles.accessCard}>
-          <Image className={styles.accessLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" width={220} height={90} priority />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className={styles.accessLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" />
           <p className={styles.sectionLabel}>Protected class demo</p>
           <h1>RepairOps AI dashboard</h1>
           <p>
@@ -2098,7 +2226,8 @@ export default function Home() {
     <main className={styles.page}>
       <header className={styles.hero}>
         <div className={styles.heroBrand}>
-          <Image className={styles.brandLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" width={220} height={90} priority />
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img className={styles.brandLogo} src="/tnf-logo-visible.png" alt="Talk N Fix" />
           <div>
             <p className={styles.kicker}>Talk N Fix</p>
             <h1>
@@ -2106,9 +2235,12 @@ export default function Home() {
             </h1>
           </div>
         </div>
-        <a href="https://talknfixcherryhill.com/" target="_blank" rel="noreferrer">
-          Public site source
-        </a>
+        <nav className={styles.heroLinks} aria-label="Project links">
+          <a href="/data-dashboard">Data dashboard</a>
+          <a href="https://talknfixcherryhill.com/" target="_blank" rel="noreferrer">
+            Public site source
+          </a>
+        </nav>
       </header>
 
       <section className={styles.layout}>
@@ -2148,7 +2280,64 @@ export default function Home() {
                 placeholder="customer@email.com"
               />
             </label>
-            <small>Enter this before opening the agent. Name and phone stay local; email is used only for pickup/review workflow.</small>
+            <small>Enter this before creating a repair ticket. Name and phone stay local; email is used only for pickup/review workflow.</small>
+          </div>
+          <div className={styles.databaseBox}>
+            <div className={styles.databaseHeader}>
+              <div>
+                <p className={styles.sectionLabel}>Week 2 data platform</p>
+                <h2>Cloud PostgreSQL</h2>
+              </div>
+              <button type="button" onClick={() => void refreshDatabaseSummary()} disabled={isDatabaseLoading}>
+                {isDatabaseLoading ? "Checking..." : "Refresh"}
+              </button>
+            </div>
+            <p className={styles.databaseStatus}>
+              {databaseSummary?.connected
+                ? "Connected to Supabase summary views."
+                : databaseSummary?.reason || "Checking database connection..."}
+            </p>
+            <div className={styles.databaseMetrics}>
+              <div>
+                <span>Total repairs</span>
+                <strong>{databaseSummary?.summary?.total_repairs ?? "-"}</strong>
+              </div>
+              <div>
+                <span>Active</span>
+                <strong>{databaseSummary?.summary?.active_repairs ?? "-"}</strong>
+              </div>
+              <div>
+                <span>Paid revenue</span>
+                <strong>${databaseSummary?.summary?.paid_revenue ?? "0.00"}</strong>
+              </div>
+              <div>
+                <span>Pending</span>
+                <strong>{databaseSummary?.summary?.pending_payments ?? "-"}</strong>
+              </div>
+            </div>
+            <div className={styles.databaseRecords}>
+              <div className={styles.databaseRecordsHeader}>
+                <span>Recent cloud records</span>
+                <strong>{databaseSummary?.repairs?.length ?? 0}</strong>
+              </div>
+              {databaseSummary?.connected && databaseSummary.repairs.length ? (
+                databaseSummary.repairs.slice(0, 4).map((repair) => (
+                  <div className={styles.databaseRecordRow} key={repair.repair_ticket_id}>
+                    <div>
+                      <strong>{repair.repair_ticket_id}</strong>
+                      <span>{repair.device_model}</span>
+                    </div>
+                    <div>
+                      <span>{repair.repair_status.replaceAll("_", " ")}</span>
+                      <b>{repair.payment_status?.replaceAll("_", " ") ?? "missing payment"}</b>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <p>No cloud records loaded yet.</p>
+              )}
+            </div>
+            <small>{databaseWriteStatus}</small>
           </div>
           <button
             className={styles.intakeButton}

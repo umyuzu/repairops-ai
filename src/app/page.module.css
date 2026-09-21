@@ -146,7 +146,15 @@
   vertical-align: baseline;
 }
 
-.hero a {
+.heroLinks {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+.heroLinks a {
   min-height: 40px;
   padding: 0 14px;
   border: 1px solid #b8daf8;
@@ -157,6 +165,11 @@
   background: #0576d8;
   font-weight: 800;
   white-space: nowrap;
+}
+
+.heroLinks a:first-child {
+  border-color: #b7e6d1;
+  background: #087047;
 }
 
 .kicker,
@@ -290,6 +303,154 @@
   font-size: 12px;
   line-height: 1.4;
   font-weight: 700;
+}
+
+.databaseBox {
+  padding: 14px;
+  border: 1px solid rgba(25, 166, 106, 0.32);
+  border-radius: 12px;
+  background: linear-gradient(180deg, #ffffff 0%, #eefbf5 100%);
+  box-shadow: inset 4px 0 0 #19a66a, 0 14px 28px rgba(25, 166, 106, 0.08);
+  display: grid;
+  gap: 10px;
+}
+
+.databaseHeader {
+  display: flex;
+  justify-content: space-between;
+  gap: 10px;
+  align-items: flex-start;
+}
+
+.databaseHeader h2 {
+  margin-top: 3px;
+  color: #075436;
+  font-size: 17px;
+  line-height: 1.1;
+}
+
+.databaseHeader button {
+  min-height: 34px;
+  border: 1px solid #b7e6d1;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #087047;
+  font-weight: 900;
+  cursor: pointer;
+}
+
+.databaseHeader button:disabled {
+  opacity: 0.7;
+  cursor: wait;
+}
+
+.databaseStatus {
+  margin: 0;
+  color: #31536f;
+  font-size: 12px;
+  font-weight: 800;
+  line-height: 1.35;
+}
+
+.databaseMetrics {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 8px;
+}
+
+.databaseMetrics div {
+  min-height: 62px;
+  padding: 10px;
+  border: 1px solid #d8e4ef;
+  border-radius: 10px;
+  background: #ffffff;
+  display: grid;
+  gap: 4px;
+}
+
+.databaseMetrics span {
+  color: #63778a;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.databaseMetrics strong {
+  color: #075436;
+  font-size: 20px;
+  line-height: 1;
+}
+
+.databaseBox small {
+  padding: 9px 10px;
+  border-radius: 9px;
+  background: #ffffff;
+  color: #31536f;
+  font-size: 12px;
+  line-height: 1.4;
+  font-weight: 700;
+}
+
+.databaseRecords {
+  padding: 10px;
+  border: 1px solid #d8e4ef;
+  border-radius: 10px;
+  background: #ffffff;
+  display: grid;
+  gap: 8px;
+}
+
+.databaseRecordsHeader {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  color: #63778a;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.databaseRecordsHeader strong {
+  color: #075436;
+  font-size: 13px;
+}
+
+.databaseRecordRow {
+  padding: 8px 0 0;
+  border-top: 1px solid #eef3f8;
+  display: grid;
+  gap: 5px;
+}
+
+.databaseRecordRow:first-of-type {
+  border-top: 0;
+  padding-top: 0;
+}
+
+.databaseRecordRow div {
+  display: flex;
+  justify-content: space-between;
+  gap: 8px;
+  align-items: center;
+}
+
+.databaseRecordRow strong {
+  color: #075436;
+  font-size: 13px;
+}
+
+.databaseRecordRow span,
+.databaseRecordRow b,
+.databaseRecords p {
+  margin: 0;
+  color: #31536f;
+  font-size: 11px;
+  line-height: 1.25;
+}
+
+.databaseRecordRow b {
+  color: #087047;
+  text-align: right;
 }
 
 .commandIntro {
