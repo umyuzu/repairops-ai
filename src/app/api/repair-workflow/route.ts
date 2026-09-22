@@ -1,12 +1,19 @@
 import { NextResponse } from "next/server";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { getPool } from "@/lib/postgres";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type WorkflowAction = "before_photo" | "pickup_email" | "after_photo" | "warranty_acceptance" | "review_request";
 type JsonRecord = Record<string, unknown>;
+type DatabaseWriteResult = {
+  fileName: string;
+  recordKey?: unknown;
+  operation: string;
+  totalRecords?: number;
+};
 
 type WorkflowPayload = {
   action?: WorkflowAction;
@@ -74,6 +81,241 @@ async function upsertJsonRecord(fileName: string, record: JsonRecord, key: strin
     operation: existingIndex >= 0 ? "updated" : "inserted",
     totalRecords: nextRecords.length,
   };
+}
+
+async function writePostgresWorkflowRecords(
+  action: WorkflowAction,
+  payload: {
+    ticketId: string;
+    customerName: string;
+    customerEmail: string;
+    device: string;
+    issue: string;
+    repairSummary: string;
+    subject?: string;
+    body?: string;
+    emailStatus?: string;
+    signedAt?: string;
+    aiDecision?: AgentDecision;
+  },
+): Promise<DatabaseWriteResult[]> {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const {
+    ticketId,
+    customerName,
+    customerEmail,
+    device,
+    issue,
+    repairSummary,
+    subject = "",
+    body = "",
+    emailStatus = "draft",
+    signedAt,
+    aiDecision,
+  } = payload;
+  const now = new Date().toISOString();
+  const writes: DatabaseWriteResult[] = [];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+
+    if (action === "before_photo") {
+      await client.query(
+        `INSERT INTO repair_photos (photo_id, repair_ticket_id, photo_type, file_name, file_path, storage_note)
+         VALUES ($1, $2, 'before', $3, $4, $5)
+         ON CONFLICT (photo_id) DO UPDATE SET
+           file_name = EXCLUDED.file_name,
+           file_path = EXCLUDED.file_path,
+           storage_note = EXCLUDED.storage_note,
+           uploaded_at = CURRENT_TIMESTAMP`,
+        [
+          `PHOTO-${ticketId}-BEFORE`,
+          ticketId,
+          `${ticketId}-before-photo-proof`,
+          `metadata://${ticketId}/before-photo-proof`,
+          "Before-condition proof metadata recorded from the web workflow.",
+        ],
+      );
+      await client.query(
+        `UPDATE repair_tickets
+         SET status = 'before_photo_recorded',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE repair_ticket_id = $1`,
+        [ticketId],
+      );
+      writes.push({ fileName: "postgres: repair_photos", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    }
+
+    if (action === "pickup_email") {
+      await client.query(
+        `INSERT INTO email_messages (
+           email_id, repair_ticket_id, email_type, subject, body, created_by_agent, approval_status, sent_at
+         )
+         VALUES ($1, $2, 'pickup_ready', $3, $4, 'Pickup Email Agent', $5, $6)
+         ON CONFLICT (email_id) DO UPDATE SET
+           subject = EXCLUDED.subject,
+           body = EXCLUDED.body,
+           approval_status = EXCLUDED.approval_status,
+           sent_at = EXCLUDED.sent_at`,
+        [
+          `EMAIL-${ticketId}-PICKUP`,
+          ticketId,
+          subject || `Talk N Fix pickup ready - ${device}`,
+          body || `Pickup email generated for ${customerEmail || "customer"}.`,
+          emailStatus === "sent" ? "sent" : emailStatus,
+          emailStatus === "sent" ? now : null,
+        ],
+      );
+      await client.query(
+        `UPDATE repair_tickets
+         SET status = 'ready_for_pickup',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE repair_ticket_id = $1`,
+        [ticketId],
+      );
+      writes.push({ fileName: "postgres: email_messages", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    }
+
+    if (action === "after_photo") {
+      await client.query(
+        `INSERT INTO repair_photos (photo_id, repair_ticket_id, photo_type, file_name, file_path, storage_note)
+         VALUES ($1, $2, 'after', $3, $4, $5)
+         ON CONFLICT (photo_id) DO UPDATE SET
+           file_name = EXCLUDED.file_name,
+           file_path = EXCLUDED.file_path,
+           storage_note = EXCLUDED.storage_note,
+           uploaded_at = CURRENT_TIMESTAMP`,
+        [
+          `PHOTO-${ticketId}-AFTER`,
+          ticketId,
+          `${ticketId}-after-photo-proof`,
+          `metadata://${ticketId}/after-photo-proof`,
+          "After-repair proof metadata recorded before warranty signature.",
+        ],
+      );
+      await client.query(
+        `INSERT INTO technician_notes (
+           note_id, repair_ticket_id, technician_label, note_text, tests_completed, parts_replaced, remaining_issue
+         )
+         VALUES ($1, $2, 'Demo technician', $3, $4, $5, $6)
+         ON CONFLICT (note_id) DO UPDATE SET
+           note_text = EXCLUDED.note_text,
+           tests_completed = EXCLUDED.tests_completed,
+           parts_replaced = EXCLUDED.parts_replaced,
+           remaining_issue = EXCLUDED.remaining_issue`,
+        [
+          `NOTE-${ticketId}`,
+          ticketId,
+          repairSummary,
+          "display, touch, camera, speaker, charging",
+          device,
+          issue.toLowerCase().includes("water") ? "High-risk water damage noted." : "No remaining issue reported.",
+        ],
+      );
+      await client.query(
+        `UPDATE repair_tickets
+         SET status = 'after_photo_recorded',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE repair_ticket_id = $1`,
+        [ticketId],
+      );
+      writes.push({ fileName: "postgres: repair_photos", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: technician_notes", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    }
+
+    if (action === "warranty_acceptance") {
+      await client.query(
+        `INSERT INTO warranty_acceptances (
+           warranty_id, repair_ticket_id, typed_customer_name, warranty_version, warranty_text,
+           device_working_confirmed, accepted_at, pdf_file_name, pdf_file_path
+         )
+         VALUES ($1, $2, $3, 'v1-demo', $4, TRUE, $5, $6, $7)
+         ON CONFLICT (warranty_id) DO UPDATE SET
+           typed_customer_name = EXCLUDED.typed_customer_name,
+           warranty_text = EXCLUDED.warranty_text,
+           device_working_confirmed = EXCLUDED.device_working_confirmed,
+           accepted_at = EXCLUDED.accepted_at,
+           pdf_file_name = EXCLUDED.pdf_file_name,
+           pdf_file_path = EXCLUDED.pdf_file_path`,
+        [
+          `WARRANTY-${ticketId}`,
+          ticketId,
+          customerName,
+          aiDecision?.warrantyStatement ||
+            "Customer received the repaired device in working condition and accepted the limited warranty terms.",
+          signedAt || now,
+          `${ticketId}-warranty-acceptance.pdf`,
+          `metadata://${ticketId}/warranty-acceptance.pdf`,
+        ],
+      );
+      await client.query(
+        `UPDATE repair_tickets
+         SET status = 'warranty_signed',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE repair_ticket_id = $1`,
+        [ticketId],
+      );
+      writes.push({ fileName: "postgres: warranty_acceptances", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    }
+
+    if (action === "review_request") {
+      await client.query(
+        `INSERT INTO email_messages (
+           email_id, repair_ticket_id, email_type, subject, body, created_by_agent, approval_status, sent_at
+         )
+         VALUES ($1, $2, 'review_request', $3, $4, 'Review Follow-up Agent', $5, $6)
+         ON CONFLICT (email_id) DO UPDATE SET
+           subject = EXCLUDED.subject,
+           body = EXCLUDED.body,
+           approval_status = EXCLUDED.approval_status,
+           sent_at = EXCLUDED.sent_at`,
+        [
+          `EMAIL-${ticketId}-REVIEW`,
+          ticketId,
+          subject || "Thank you from Talk N Fix",
+          body || `Review follow-up generated for ${customerEmail || "customer"}.`,
+          emailStatus === "sent" ? "sent" : emailStatus,
+          emailStatus === "sent" ? now : null,
+        ],
+      );
+      await client.query(
+        `INSERT INTO review_requests (
+           review_request_id, repair_ticket_id, email_id, eligible, requested_at, review_received
+         )
+         VALUES ($1, $2, $3, TRUE, $4, FALSE)
+         ON CONFLICT (review_request_id) DO UPDATE SET
+           email_id = EXCLUDED.email_id,
+           eligible = EXCLUDED.eligible,
+           requested_at = EXCLUDED.requested_at`,
+        [`REVIEW-${ticketId}`, ticketId, `EMAIL-${ticketId}-REVIEW`, now],
+      );
+      await client.query(
+        `UPDATE repair_tickets
+         SET status = 'review_requested',
+             updated_at = CURRENT_TIMESTAMP
+         WHERE repair_ticket_id = $1`,
+        [ticketId],
+      );
+      writes.push({ fileName: "postgres: email_messages", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: review_requests", operation: "upserted", totalRecords: 1 });
+      writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    }
+
+    await client.query("COMMIT");
+    return writes;
+  } catch {
+    await client.query("ROLLBACK");
+    return [{ fileName: "postgres workflow tables", operation: "failed", totalRecords: 0 }];
+  } finally {
+    client.release();
+  }
 }
 
 async function sendEmail(to: string, subject: string, html: string, text?: string) {
@@ -405,8 +647,17 @@ export async function POST(request: Request) {
         "activity_id",
       ),
     ];
+    const postgresWrites = await writePostgresWorkflowRecords(action, {
+      ticketId,
+      customerName,
+      customerEmail,
+      device,
+      issue,
+      repairSummary,
+      aiDecision,
+    });
 
-    return NextResponse.json({ ok: true, action, aiDecision, repairCase, photoRecord, databaseWrites: writeResults });
+    return NextResponse.json({ ok: true, action, aiDecision, repairCase, photoRecord, databaseWrites: [...writeResults, ...postgresWrites] });
   }
 
   if (action === "pickup_email") {
@@ -447,8 +698,20 @@ export async function POST(request: Request) {
         "activity_id",
       ),
     ];
+    const postgresWrites = await writePostgresWorkflowRecords(action, {
+      ticketId,
+      customerName,
+      customerEmail,
+      device,
+      issue,
+      repairSummary,
+      subject: email.subject,
+      body: email.text,
+      emailStatus: sendResult.status,
+      aiDecision,
+    });
 
-    return NextResponse.json({ ok: true, action, aiDecision, emailEvent: event, databaseWrites: writeResults });
+    return NextResponse.json({ ok: true, action, aiDecision, emailEvent: event, databaseWrites: [...writeResults, ...postgresWrites] });
   }
 
   if (action === "after_photo") {
@@ -502,8 +765,17 @@ export async function POST(request: Request) {
         "activity_id",
       ),
     ];
+    const postgresWrites = await writePostgresWorkflowRecords(action, {
+      ticketId,
+      customerName,
+      customerEmail,
+      device,
+      issue,
+      repairSummary,
+      aiDecision,
+    });
 
-    return NextResponse.json({ ok: true, action, aiDecision, repairCase, photoRecord, technicianNote, databaseWrites: writeResults });
+    return NextResponse.json({ ok: true, action, aiDecision, repairCase, photoRecord, technicianNote, databaseWrites: [...writeResults, ...postgresWrites] });
   }
 
   if (action === "warranty_acceptance") {
@@ -540,8 +812,18 @@ export async function POST(request: Request) {
         "activity_id",
       ),
     ];
+    const postgresWrites = await writePostgresWorkflowRecords(action, {
+      ticketId,
+      customerName,
+      customerEmail,
+      device,
+      issue,
+      repairSummary,
+      signedAt: acceptance.signed_at,
+      aiDecision,
+    });
 
-    return NextResponse.json({ ok: true, action, aiDecision, warrantyAcceptance: acceptance, databaseWrites: writeResults });
+    return NextResponse.json({ ok: true, action, aiDecision, warrantyAcceptance: acceptance, databaseWrites: [...writeResults, ...postgresWrites] });
   }
 
   if (action === "review_request") {
@@ -582,8 +864,20 @@ export async function POST(request: Request) {
         "activity_id",
       ),
     ];
+    const postgresWrites = await writePostgresWorkflowRecords(action, {
+      ticketId,
+      customerName,
+      customerEmail,
+      device,
+      issue,
+      repairSummary,
+      subject: email.subject,
+      body: email.text,
+      emailStatus: sendResult.status,
+      aiDecision,
+    });
 
-    return NextResponse.json({ ok: true, action, aiDecision, reviewRequest, databaseWrites: writeResults });
+    return NextResponse.json({ ok: true, action, aiDecision, reviewRequest, databaseWrites: [...writeResults, ...postgresWrites] });
   }
 
   return NextResponse.json({ ok: false, message: "Unknown workflow action." }, { status: 400 });

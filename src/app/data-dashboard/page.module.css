@@ -11,6 +11,7 @@
 .statusBand,
 .metricsGrid,
 .dashboardGrid,
+.cleaningPanel,
 .tablePanel,
 .pipeline {
   width: min(1440px, 100%);
@@ -102,6 +103,7 @@
 .statusBand div,
 .metricCard,
 .panel,
+.cleaningPanel,
 .tablePanel,
 .pipeline,
 .errorBox {
@@ -166,9 +168,57 @@
 }
 
 .panel,
+.cleaningPanel,
 .tablePanel,
 .pipeline {
   padding: 16px;
+}
+
+.cleaningPanel {
+  display: grid;
+  gap: 14px;
+}
+
+.cleaningGrid {
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.cleaningCard {
+  min-height: 84px;
+  padding: 14px;
+  border: 1px solid #d8e4ef;
+  border-radius: 10px;
+  background: #f8fbfe;
+  display: grid;
+  align-content: space-between;
+}
+
+.cleaningCard span {
+  color: #63778a;
+  font-size: 11px;
+  font-weight: 900;
+  text-transform: uppercase;
+}
+
+.cleaningCard strong {
+  color: #073d72;
+  font-size: 24px;
+  line-height: 1;
+}
+
+.cleanOk,
+.cleanMissing {
+  font-weight: 900;
+}
+
+.cleanOk {
+  color: #087047 !important;
+}
+
+.cleanMissing {
+  color: #9b2c22 !important;
 }
 
 .panelHeader {
@@ -322,7 +372,8 @@
 
 @media (max-width: 1100px) {
   .metricsGrid,
-  .dashboardGrid {
+  .dashboardGrid,
+  .cleaningGrid {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
@@ -351,7 +402,8 @@
   }
 
   .metricsGrid,
-  .dashboardGrid {
+  .dashboardGrid,
+  .cleaningGrid {
     grid-template-columns: 1fr;
   }
 }

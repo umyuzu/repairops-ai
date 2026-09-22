@@ -2,11 +2,18 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { NextResponse } from "next/server";
+import { getPool } from "@/lib/postgres";
 
 export const dynamic = "force-dynamic";
 export const runtime = "nodejs";
 
 type JsonRecord = Record<string, unknown>;
+type DatabaseWriteResult = {
+  fileName: string;
+  recordKey?: unknown;
+  operation: string;
+  totalRecords?: number;
+};
 
 type SquarePayment = {
   id: string;
@@ -384,6 +391,142 @@ async function writeLocalDatabaseRecords(ticketId: string, payment: SquarePaymen
   };
 }
 
+async function writePostgresPaymentRecords(
+  ticketId: string,
+  payment: SquarePayment,
+  paymentEvent: ReturnType<typeof makePaymentEvent>,
+  source: string,
+): Promise<DatabaseWriteResult[]> {
+  const pool = getPool();
+  if (!pool) return [];
+
+  const amountCents = payment.amount_money.amount;
+  const amountDollars = amountCents / 100;
+  const currency = payment.amount_money.currency;
+  const now = new Date().toISOString();
+  const eventId = paymentEvent.event_id;
+  const status = payment.status;
+  const cleanPaymentStatus =
+    status === "COMPLETED" ? "paid" : status === "APPROVED" ? "approved_not_completed" : status.toLowerCase();
+  const cardBrand = payment.card_details?.card?.card_brand || null;
+  const cardLast4 = payment.card_details?.card?.last_4 || null;
+  const locationId = process.env.SQUARE_LOCATION_ID?.trim() || null;
+  const writes: DatabaseWriteResult[] = [];
+  const client = await pool.connect();
+
+  try {
+    await client.query("BEGIN");
+    await client.query(
+      `INSERT INTO square_events_cleaned (
+         event_id, merchant_id, event_type, event_created_at, data_type, data_id,
+         payment_id, payment_created_at, payment_updated_at, payment_status,
+         clean_payment_status, amount_cents, amount_dollars, currency, source_type,
+         card_brand, card_last_4, location_id, order_id, risk_level, source_file
+       )
+       VALUES ($1, $2, $3, $4, 'payment', $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, NULL, 'low', $18)
+       ON CONFLICT (event_id) DO UPDATE SET
+         payment_status = EXCLUDED.payment_status,
+         clean_payment_status = EXCLUDED.clean_payment_status,
+         amount_cents = EXCLUDED.amount_cents,
+         amount_dollars = EXCLUDED.amount_dollars,
+         currency = EXCLUDED.currency,
+         source_type = EXCLUDED.source_type,
+         card_brand = EXCLUDED.card_brand,
+         card_last_4 = EXCLUDED.card_last_4,
+         location_id = EXCLUDED.location_id,
+         source_file = EXCLUDED.source_file,
+         cleaned_at = CURRENT_TIMESTAMP`,
+      [
+        eventId,
+        paymentEvent.merchant_id,
+        paymentEvent.type,
+        paymentEvent.created_at,
+        payment.id,
+        payment.id,
+        now,
+        now,
+        status,
+        cleanPaymentStatus,
+        amountCents,
+        amountDollars,
+        currency,
+        payment.source_type || "CARD",
+        cardBrand,
+        cardLast4,
+        locationId,
+        source,
+      ],
+    );
+    await client.query(
+      `INSERT INTO payments (
+         payment_id, latest_event_id, repair_ticket_id, amount_dollars, currency,
+         payment_status, source_type, paid_at, last_updated_at, needs_review
+       )
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, FALSE)
+       ON CONFLICT (payment_id) DO UPDATE SET
+         latest_event_id = EXCLUDED.latest_event_id,
+         repair_ticket_id = EXCLUDED.repair_ticket_id,
+         amount_dollars = EXCLUDED.amount_dollars,
+         currency = EXCLUDED.currency,
+         payment_status = EXCLUDED.payment_status,
+         source_type = EXCLUDED.source_type,
+         paid_at = EXCLUDED.paid_at,
+         last_updated_at = EXCLUDED.last_updated_at,
+         needs_review = EXCLUDED.needs_review`,
+      [
+        payment.id,
+        eventId,
+        ticketId,
+        amountDollars,
+        currency,
+        cleanPaymentStatus,
+        payment.source_type || "CARD",
+        status === "COMPLETED" || status === "APPROVED" ? now : null,
+        now,
+      ],
+    );
+    await client.query(
+      `INSERT INTO payment_status_history (history_id, payment_id, event_id, previous_status, new_status, changed_at, note)
+       VALUES ($1, $2, $3, NULL, $4, $5, $6)
+       ON CONFLICT (history_id) DO UPDATE SET
+         new_status = EXCLUDED.new_status,
+         changed_at = EXCLUDED.changed_at,
+         note = EXCLUDED.note`,
+      [`HISTORY-${eventId}`, payment.id, eventId, status, now, `Payment imported from ${source}.`],
+    );
+    await client.query(
+      `INSERT INTO repair_payment_links (
+         link_id, repair_ticket_id, payment_id, link_method, confidence_level, review_required
+       )
+       VALUES ($1, $2, $3, 'ticket_id_note', 'high', FALSE)
+       ON CONFLICT (link_id) DO UPDATE SET
+         payment_id = EXCLUDED.payment_id,
+         confidence_level = EXCLUDED.confidence_level,
+         review_required = EXCLUDED.review_required`,
+      [`LINK-${ticketId}-${payment.id}`, ticketId, payment.id],
+    );
+    await client.query(
+      `UPDATE repair_tickets
+       SET status = 'payment_confirmed',
+           updated_at = CURRENT_TIMESTAMP
+       WHERE repair_ticket_id = $1`,
+      [ticketId],
+    );
+    await client.query("COMMIT");
+    writes.push({ fileName: "postgres: square_events_cleaned", operation: "upserted", totalRecords: 1 });
+    writes.push({ fileName: "postgres: payments", operation: "upserted", totalRecords: 1 });
+    writes.push({ fileName: "postgres: payment_status_history", operation: "upserted", totalRecords: 1 });
+    writes.push({ fileName: "postgres: repair_payment_links", operation: "upserted", totalRecords: 1 });
+    writes.push({ fileName: "postgres: repair_tickets.status", operation: "updated", totalRecords: 1 });
+    return writes;
+  } catch {
+    await client.query("ROLLBACK");
+    return [{ fileName: "postgres payment tables", operation: "failed", totalRecords: 0 }];
+  } finally {
+    client.release();
+  }
+}
+
 export async function GET(request: Request) {
   const url = new URL(request.url);
   if (url.searchParams.get("debug") === "locations") {
@@ -397,12 +540,13 @@ export async function GET(request: Request) {
     const { source, payment } = await createSquareSandboxPayment(ticketId, amountCents);
     const aiDecision = await runPaymentAgentReasoning(ticketId, amountCents, payment);
     const { paymentEvent, writeResults } = await writeLocalDatabaseRecords(ticketId, payment, source);
+    const postgresWrites = await writePostgresPaymentRecords(ticketId, payment, paymentEvent, source);
 
     return NextResponse.json({
       source,
       aiDecision,
       rawEvent: paymentEvent,
-      databaseWrites: writeResults,
+      databaseWrites: [...writeResults, ...postgresWrites],
       cleanedPayment: {
         eventId: paymentEvent.event_id,
         eventType: paymentEvent.type,

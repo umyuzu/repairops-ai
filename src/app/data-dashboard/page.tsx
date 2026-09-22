@@ -43,6 +43,31 @@ type WarrantyCoverage = {
   missing_warranty_records: number;
 };
 
+type DataCleaningSummary = {
+  total_tickets: number;
+  incomplete_device_records: number;
+  missing_before_photos: number;
+  missing_after_photos: number;
+  missing_warranties: number;
+  missing_payments: number;
+  nonstandard_payment_statuses: number;
+  cleaned_square_events: number;
+  photo_records: number;
+  technician_note_records: number;
+};
+
+type DocumentationGapRow = {
+  repair_ticket_id: string;
+  display_name: string;
+  device_model: string;
+  repair_status: string;
+  payment_status: string;
+  has_before_photo: boolean;
+  has_after_photo: boolean;
+  has_warranty: boolean;
+  has_payment: boolean;
+};
+
 type DashboardResponse = {
   connected: boolean;
   reason?: string;
@@ -52,6 +77,8 @@ type DashboardResponse = {
   repairStatus: CountRow[];
   deviceFamilies: CountRow[];
   warrantyCoverage: WarrantyCoverage | null;
+  dataCleaning?: DataCleaningSummary | null;
+  documentationGaps?: DocumentationGapRow[];
 };
 
 const emptyData: DashboardResponse = {
@@ -62,6 +89,8 @@ const emptyData: DashboardResponse = {
   repairStatus: [],
   deviceFamilies: [],
   warrantyCoverage: null,
+  dataCleaning: null,
+  documentationGaps: [],
 };
 
 function money(value: string | number | null | undefined) {
@@ -130,6 +159,20 @@ export default function DataDashboardPage() {
     [data.summary],
   );
 
+  const cleaningCards = useMemo(
+    () => [
+      ["Tickets checked", data.dataCleaning?.total_tickets ?? "-"],
+      ["Missing before photos", data.dataCleaning?.missing_before_photos ?? "-"],
+      ["Missing after photos", data.dataCleaning?.missing_after_photos ?? "-"],
+      ["Missing warranties", data.dataCleaning?.missing_warranties ?? "-"],
+      ["Missing payments", data.dataCleaning?.missing_payments ?? "-"],
+      ["Cleaned Square events", data.dataCleaning?.cleaned_square_events ?? "-"],
+    ],
+    [data.dataCleaning],
+  );
+
+  const documentationGaps = data.documentationGaps ?? [];
+
   return (
     <main className={styles.page}>
       <header className={styles.header}>
@@ -139,7 +182,7 @@ export default function DataDashboardPage() {
           <div>
             <p>Independent Study Data Platform</p>
             <h1>Repair Operations Data Dashboard</h1>
-            <span>PostgreSQL summary views, repair records, payment status, ETL planning, and analytics for the repair operations project.</span>
+            <span>Cloud PostgreSQL records, data cleaning checks, Square-style payment ETL evidence, and repair operation quality control.</span>
           </div>
         </div>
         <button type="button" onClick={() => void loadDashboard()} disabled={isLoading}>
@@ -171,6 +214,63 @@ export default function DataDashboardPage() {
             <strong>{value}</strong>
           </article>
         ))}
+      </section>
+
+      <section className={styles.cleaningPanel}>
+        <div className={styles.panelHeader}>
+          <div>
+            <p>Data Cleaning Workbench</p>
+            <h2>Record Quality and ETL Checks</h2>
+          </div>
+          <span>{data.dataCleaning?.nonstandard_payment_statuses ?? 0} status issues</span>
+        </div>
+        <div className={styles.cleaningGrid}>
+          {cleaningCards.map(([name, value]) => (
+            <div className={styles.cleaningCard} key={name}>
+              <span>{name}</span>
+              <strong>{value}</strong>
+            </div>
+          ))}
+        </div>
+        <div className={styles.tableWrap}>
+          <table>
+            <thead>
+              <tr>
+                <th>Ticket</th>
+                <th>Device</th>
+                <th>Status</th>
+                <th>Before</th>
+                <th>After</th>
+                <th>Warranty</th>
+                <th>Payment</th>
+              </tr>
+            </thead>
+            <tbody>
+              {documentationGaps.map((repair) => (
+                <tr key={repair.repair_ticket_id}>
+                  <td>
+                    <strong>{repair.repair_ticket_id}</strong>
+                    <span>{repair.display_name}</span>
+                  </td>
+                  <td>{repair.device_model}</td>
+                  <td>{label(repair.repair_status)}</td>
+                  <td className={repair.has_before_photo ? styles.cleanOk : styles.cleanMissing}>
+                    {repair.has_before_photo ? "clean" : "missing"}
+                  </td>
+                  <td className={repair.has_after_photo ? styles.cleanOk : styles.cleanMissing}>
+                    {repair.has_after_photo ? "clean" : "missing"}
+                  </td>
+                  <td className={repair.has_warranty ? styles.cleanOk : styles.cleanMissing}>
+                    {repair.has_warranty ? "clean" : "missing"}
+                  </td>
+                  <td className={repair.has_payment ? styles.cleanOk : styles.cleanMissing}>
+                    {repair.has_payment ? label(repair.payment_status) : "missing"}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
       </section>
 
       <section className={styles.dashboardGrid}>
@@ -297,13 +397,13 @@ export default function DataDashboardPage() {
       <section className={styles.pipeline}>
         <div>
           <p>Project Data Pipeline</p>
-          <h2>ETL and Analytics Direction</h2>
+          <h2>ETL and Data Cleaning Direction</h2>
         </div>
         <ol>
           <li>Collect Square-style raw payment events and repair records.</li>
-          <li>Clean status values, amounts, timestamps, and repair categories.</li>
+          <li>Clean status values, missing proof fields, amounts, timestamps, and repair categories.</li>
           <li>Load structured records into PostgreSQL summary views.</li>
-          <li>Use dashboard analytics to identify pending payments, missing warranty records, and repair trends.</li>
+          <li>Use quality checks to identify missing warranty records, missing payment links, and incomplete repair proof.</li>
         </ol>
       </section>
     </main>

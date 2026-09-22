@@ -939,7 +939,7 @@ export default function Home() {
   const refreshDatabaseSummary = useCallback(async () => {
     setIsDatabaseLoading(true);
     try {
-      const response = await fetch("/api/database-summary");
+      const response = await fetch("/api/database-summary", { cache: "no-store" });
       const payload = (await response.json()) as DatabaseSummaryResponse;
       setDatabaseSummary(payload);
     } catch {
@@ -2053,6 +2053,7 @@ export default function Home() {
       };
       appendWorkflowMessage(activeAgent.name, workflowMessages[action]);
       finishLiveMonitor("Database write confirmed");
+      void refreshDatabaseSummary();
     } catch {
       updateRepairFlow((current) => {
         const nextFlow =
@@ -2167,6 +2168,7 @@ export default function Home() {
         `Square payment ${payment?.status?.toLowerCase() ?? "processed"}. Receipt and payment record saved.`,
       );
       finishLiveMonitor("Square payment database write confirmed");
+      void refreshDatabaseSummary();
     } catch {
       updateRepairFlow((current) => {
         const nextFlow = {
